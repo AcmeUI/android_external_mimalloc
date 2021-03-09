@@ -1,0 +1,94 @@
+// Flags used for both the library and test programs
+cc_defaults {
+    name: "mimalloc_defaults",
+    defaults: ["linux_bionic_supported"],
+    cflags: [
+        "-O3",
+        //"-DNDEBUG",
+        "-DMI_DEBUG=3",
+        "-fPIC",
+        "-Wall",
+        "-Wextra",
+        "-fvisibility=hidden",
+        "-ftls-model=initial-exec",
+        "-std=gnu11",
+
+        // From scudo
+        //"-fno-stack-protector",
+        "-fno-emulated-tls",
+    ],
+    include_dirs: [
+        "external/mimalloc/include",
+    ],
+}
+
+lib_srcs = [
+    "src/stats.c",
+    "src/random.c",
+    "src/os.c",
+    "src/bitmap.c",
+    "src/arena.c",
+    "src/region.c",
+    "src/segment.c",
+    "src/page.c",
+    "src/alloc.c",
+    "src/alloc-aligned.c",
+    "src/alloc-posix.c",
+    "src/heap.c",
+    "src/options.c",
+    "src/init.c",
+]
+
+cc_library {
+    name: "libmimalloc",
+    defaults: ["mimalloc_defaults"],
+    srcs: lib_srcs,
+
+    // Essential library
+    native_coverage: false,
+    ramdisk_available: true,
+    recovery_available: true,
+    host_supported: true,
+    native_bridge_supported: true,
+
+    // Export headers for libc
+    export_include_dirs: ["include"],
+
+    // Remove dependency on libc to break dependency cycle
+    stl: "none",
+    target: {
+        android: {
+            shared: {
+                enabled: false,
+            },
+            system_shared_libs: [],
+        },
+        linux_bionic: {
+            system_shared_libs: [],
+        },
+    },
+}
+
+cc_library {
+    name: "libmimalloc_shared",
+    defaults: ["mimalloc_defaults"],
+    srcs: lib_srcs,
+}
+
+cc_binary {
+    name: "mimalloc-test-stress",
+    defaults: ["mimalloc_defaults"],
+    shared_libs: ["libmimalloc_shared"],
+    srcs: [
+        "test/test-stress.c",
+    ],
+}
+
+cc_binary {
+    name: "mimalloc-test-api",
+    defaults: ["mimalloc_defaults"],
+    static_libs: ["libmimalloc_shared"],
+    srcs: [
+        "test/test-api.c",
+    ],
+}
