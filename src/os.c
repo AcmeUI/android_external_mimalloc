@@ -239,26 +239,7 @@ void _mi_os_init() {
 #else  // generic unix
 
 static void os_detect_overcommit(void) {
-#if defined(__linux__)
-  int fd = open("/proc/sys/vm/overcommit_memory", O_RDONLY);
-	if (fd < 0) return;
-  char buf[32];
-  ssize_t nread = read(fd, &buf, sizeof(buf));
-	close(fd);
-  // <https://www.kernel.org/doc/Documentation/vm/overcommit-accounting>
-  // 0: heuristic overcommit, 1: always overcommit, 2: never overcommit (ignore NORESERVE)
-  if (nread >= 1) {
-    os_overcommit = (buf[0] == '0' || buf[0] == '1');
-  }
-#elif defined(__FreeBSD__)
-  int val = 0;
-  size_t olen = sizeof(val);
-  if (sysctlbyname("vm.overcommit", &val, &olen, NULL, 0) == 0) {
-    os_overcommit = (val != 0);
-  }  
-#else
-  // default: overcommit is true  
-#endif
+  os_overcommit = true;
 }
 
 void _mi_os_init() {
