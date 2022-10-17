@@ -36,4 +36,8 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "alloc-override-osx.c"
 #endif
 #include "init.c"
+#if !defined(__ANDROID__)
 #include "options.c"
+#else /* __ANDROID__ */
+#include "android-options.c"
+#endif /* __ANDROID__ */
