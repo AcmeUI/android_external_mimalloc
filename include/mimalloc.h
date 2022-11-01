@@ -96,6 +96,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #include <stddef.h>     // size_t
 #include <stdbool.h>    // bool
 #include <stdint.h>     // INTPTR_MAX
+#include <malloc.h>     // struct mallinfo
 
 #ifdef __cplusplus
 extern "C" {
@@ -131,6 +132,8 @@ mi_decl_nodiscard mi_decl_export void* mi_reallocf(void* p, size_t newsize)     
 
 mi_decl_nodiscard mi_decl_export size_t mi_usable_size(const void* p) mi_attr_noexcept;
 mi_decl_nodiscard mi_decl_export size_t mi_good_size(size_t size)     mi_attr_noexcept;
+
+mi_decl_nodiscard mi_decl_export struct mallinfo mi_mallinfo()        mi_attr_noexcept;
 
 
 // ------------------------------------------------------

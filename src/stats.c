@@ -582,3 +582,8 @@ mi_decl_export void mi_process_info(size_t* elapsed_msecs, size_t* user_msecs, s
   if (page_faults!=NULL)    *page_faults    = page_faults0;
 }
 
+mi_decl_nodiscard mi_decl_restrict struct mallinfo mi_mallinfo() mi_attr_noexcept {
+  struct mallinfo mi;
+  memset(&mi, 0, sizeof(mi));
+  return mi;
+}
