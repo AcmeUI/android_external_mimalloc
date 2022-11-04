@@ -15,6 +15,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #pragma warning(disable:4204)  // non-constant aggregate initializer
 #endif
 
+#if !defined(__ANDROID__)
 /* -----------------------------------------------------------
   Statistics operations
 ----------------------------------------------------------- */
@@ -391,6 +392,7 @@ void mi_stats_print(void* out) mi_attr_noexcept {
 void mi_thread_stats_print_out(mi_output_fun* out, void* arg) mi_attr_noexcept {
   _mi_stats_print(mi_stats_get_default(), out, arg);
 }
+#endif /* __ANDROID__ */
 
 
 // ----------------------------------------------------------------
@@ -451,6 +453,7 @@ mi_msecs_t _mi_clock_end(mi_msecs_t start) {
 }
 
 
+#if !defined(__ANDROID__)
 // --------------------------------------------------------
 // Basic process statistics
 // --------------------------------------------------------
@@ -581,6 +584,7 @@ mi_decl_export void mi_process_info(size_t* elapsed_msecs, size_t* user_msecs, s
   if (peak_commit!=NULL)    *peak_commit    = peak_commit0;
   if (page_faults!=NULL)    *page_faults    = page_faults0;
 }
+#endif /* __ANDROID__ */
 
 mi_decl_nodiscard mi_decl_restrict struct mallinfo mi_mallinfo() mi_attr_noexcept {
   struct mallinfo mi;

@@ -21,6 +21,9 @@ terms of the MIT license. A copy of the license can be found in the file
 // it will override all the standard library allocation
 // functions (on Unix's).
 #include "stats.c"
+#if defined(__ANDROID__)
+#include "android-stats.c"
+#endif /* __ANDROID__ */
 #include "random.c"
 #include "os.c"
 #include "bitmap.c"
