@@ -931,9 +931,9 @@ static bool mi_os_commitx(void* addr, size_t size, bool commit, bool conservativ
     if (err != 0) { err = errno; }
   } 
   else {
-    #if defined(MADV_DONTNEED) && MI_DEBUG == 0 && MI_SECURE == 0
-    // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
-    // (on the other hand, MADV_FREE would be good enough.. it is just not reflected in the stats :-( )
+    #if defined(MADV_FREE) && MI_DEBUG == 0 && MI_SECURE == 0
+    err = madvise(start, csize, MADV_FREE);
+    #elif defined(MADV_DONTNEED) && MI_DEBUG == 0 && MI_SECURE == 0
     err = madvise(start, csize, MADV_DONTNEED);
     #else
     // decommit: just disable access (also used in debug and secure mode to trap on illegal access)
