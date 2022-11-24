@@ -29,7 +29,7 @@ mi_decl_nodiscard inline long mi_option_get(mi_option_t option)
   case mi_option_segment_decommit_delay:
   return 500;
   case mi_option_decommit_extend_delay:
-  return 2;
+  return 1;
   case mi_option_decommit_delay:
   return 25;
   default:
