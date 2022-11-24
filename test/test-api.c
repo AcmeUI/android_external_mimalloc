@@ -34,7 +34,7 @@ we therefore test the API over various inputs. Please add more tests :-)
 
 #include "mimalloc.h"
 // #include "mimalloc-internal.h"
-#include "mimalloc-types.h" // for MI_DEBUG
+#include "mimalloc-types.h" // for MI_DEBUG and MI_ALIGNMENT_MAX
 
 #include "testhelper.h"
 
@@ -149,7 +149,7 @@ int main(void) {
     for (size_t align = 1; align <= MI_ALIGNMENT_MAX && ok; align *= 2) {
       void* ps[8];
       for (int i = 0; i < 8 && ok; i++) {
-        ps[i] = mi_malloc_aligned(align*13 /*size*/, align);
+        ps[i] = mi_malloc_aligned(align*5 /*size*/, align);
         if (ps[i] == NULL || (uintptr_t)(ps[i]) % align != 0) {
           ok = false;
         }
@@ -161,10 +161,35 @@ int main(void) {
     result = ok;
   };
   CHECK_BODY("malloc-aligned7") {
-    void* p = mi_malloc_aligned(1024,MI_ALIGNMENT_MAX); mi_free(p);
-    };
+    void* p = mi_malloc_aligned(1024,MI_ALIGNMENT_MAX);
+    mi_free(p);
+    result = ((uintptr_t)p % MI_ALIGNMENT_MAX) == 0;
+  };
   CHECK_BODY("malloc-aligned8") {
-    void* p = mi_malloc_aligned(1024,2*MI_ALIGNMENT_MAX); mi_free(p);
+    bool ok = true;
+    for (int i = 0; i < 5 && ok; i++) {
+      int n = (1 << i);
+      void* p = mi_malloc_aligned(1024, n * MI_ALIGNMENT_MAX);
+      ok = ((uintptr_t)p % (n*MI_ALIGNMENT_MAX)) == 0;
+      mi_free(p);
+    }
+    result = ok;
+  };
+  CHECK_BODY("malloc-aligned9") {
+    bool ok = true;
+    void* p[8];
+    size_t sizes[8] = { 8, 512, 1024 * 1024, MI_ALIGNMENT_MAX, MI_ALIGNMENT_MAX + 1, 2 * MI_ALIGNMENT_MAX, 8 * MI_ALIGNMENT_MAX, 0 };
+    for (int i = 0; i < 28 && ok; i++) {
+      int align = (1 << i);
+      for (int j = 0; j < 8 && ok; j++) {
+        p[j] = mi_zalloc_aligned(sizes[j], align);
+        ok = ((uintptr_t)p[j] % align) == 0;
+      }
+      for (int j = 0; j < 8; j++) {
+        mi_free(p[j]);
+      }      
+    }
+    result = ok;
   };
   CHECK_BODY("malloc-aligned-at1") {
     void* p = mi_malloc_aligned_at(48,32,0); result = (p != NULL && ((uintptr_t)(p) + 0) % 32 == 0); mi_free(p);

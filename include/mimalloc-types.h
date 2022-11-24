@@ -71,6 +71,13 @@ terms of the MIT license. A copy of the license can be found in the file
 #endif
 
 
+// We used to abandon huge pages but to eagerly deallocate if freed from another thread,
+// but that makes it not possible to visit them during a heap walk or include them in a
+// `mi_heap_destroy`. We therefore instead reset/decommit the huge blocks if freed from
+// another thread so most memory is available until it gets properly freed by the owning thread.
+// #define MI_HUGE_PAGE_ABANDON 1
+
+
 // ------------------------------------------------------
 // Platform specific values
 // ------------------------------------------------------
@@ -135,7 +142,7 @@ typedef int32_t  mi_ssize_t;
 #define MI_SEGMENT_SLICE_SHIFT            (13 + MI_INTPTR_SHIFT)         // 64KiB  (32KiB on 32-bit)
 
 #if MI_INTPTR_SIZE > 4
-#define MI_SEGMENT_SHIFT                  (10 + MI_SEGMENT_SLICE_SHIFT)  // 64MiB
+#define MI_SEGMENT_SHIFT                  ( 9 + MI_SEGMENT_SLICE_SHIFT)  // 32MiB
 #else
 #define MI_SEGMENT_SHIFT                  ( 7 + MI_SEGMENT_SLICE_SHIFT)  // 4MiB on 32-bit
 #endif
@@ -147,7 +154,7 @@ typedef int32_t  mi_ssize_t;
 // Derived constants
 #define MI_SEGMENT_SIZE                   (MI_ZU(1)<<MI_SEGMENT_SHIFT)
 #define MI_SEGMENT_ALIGN                  MI_SEGMENT_SIZE
-#define MI_SEGMENT_MASK                   (MI_SEGMENT_SIZE - 1)
+#define MI_SEGMENT_MASK                   (MI_SEGMENT_ALIGN - 1)
 #define MI_SEGMENT_SLICE_SIZE             (MI_ZU(1)<< MI_SEGMENT_SLICE_SHIFT)
 #define MI_SLICES_PER_SEGMENT             (MI_SEGMENT_SIZE / MI_SEGMENT_SLICE_SIZE) // 1024
 
@@ -166,12 +173,6 @@ typedef int32_t  mi_ssize_t;
 #if (MI_MEDIUM_OBJ_WSIZE_MAX >= 655360)
 #error "mimalloc internal: define more bins"
 #endif
-#if (MI_ALIGNMENT_MAX > MI_SEGMENT_SIZE/2)
-#error "mimalloc internal: the max aligned boundary is too large for the segment size"
-#endif
-#if (MI_ALIGNED_MAX % MI_SEGMENT_SLICE_SIZE != 0)
-#error "mimalloc internal: the max aligned boundary must be an integral multiple of the segment slice size"
-#endif
 
 // Maximum slice offset (15)
 #define MI_MAX_SLICE_OFFSET               ((MI_ALIGNMENT_MAX / MI_SEGMENT_SLICE_SIZE) - 1)
@@ -182,7 +183,8 @@ typedef int32_t  mi_ssize_t;
 // blocks up to this size are always allocated aligned
 #define MI_MAX_ALIGN_GUARANTEE            (8*MI_MAX_ALIGN_SIZE)  
 
-
+// Alignments over MI_ALIGNMENT_MAX are allocated in dedicated huge page segments 
+#define MI_ALIGNMENT_MAX                  (MI_SEGMENT_SIZE >> 1)  
 
 
 // ------------------------------------------------------
@@ -284,13 +286,14 @@ typedef struct mi_page_s {
   uint8_t               retire_expire : 7;   // expiration count for retired blocks
 
   mi_block_t*           free;              // list of available free blocks (`malloc` allocates from this list)
+  uint32_t              used;              // number of blocks in use (including blocks in `local_free` and `thread_free`)
+  uint32_t              xblock_size;       // size available in each block (always `>0`) 
+  mi_block_t*           local_free;        // list of deferred free blocks by this thread (migrates to `free`)
+
   #ifdef MI_ENCODE_FREELIST
   uintptr_t             keys[2];           // two random keys to encode the free lists (see `_mi_block_next`)
   #endif
-  uint32_t              used;              // number of blocks in use (including blocks in `local_free` and `thread_free`)
-  uint32_t              xblock_size;       // size available in each block (always `>0`) 
 
-  mi_block_t* local_free;                  // list of deferred free blocks by this thread (migrates to `free`)
   _Atomic(mi_thread_free_t) xthread_free;  // list of deferred free blocks freed by other threads
   _Atomic(uintptr_t)        xheap;
 
@@ -329,7 +332,7 @@ typedef enum mi_segment_kind_e {
 // is still tracked in fine-grained MI_COMMIT_SIZE chunks)
 // ------------------------------------------------------
 
-#define MI_MINIMAL_COMMIT_SIZE      (2*MI_MiB)
+#define MI_MINIMAL_COMMIT_SIZE      (16*MI_SEGMENT_SLICE_SIZE)           // 1MiB
 #define MI_COMMIT_SIZE              (MI_SEGMENT_SLICE_SIZE)              // 64KiB
 #define MI_COMMIT_MASK_BITS         (MI_SEGMENT_SIZE / MI_COMMIT_SIZE)  
 #define MI_COMMIT_MASK_FIELD_BITS    MI_SIZE_BITS
@@ -355,6 +358,8 @@ typedef struct mi_segment_s {
   bool              mem_is_pinned;      // `true` if we cannot decommit/reset/protect in this memory (i.e. when allocated using large OS pages)    
   bool              mem_is_large;       // in large/huge os pages?
   bool              mem_is_committed;   // `true` if the whole segment is eagerly committed
+  size_t            mem_alignment;      // page alignment for huge pages (only used for alignment > MI_ALIGNMENT_MAX)
+  size_t            mem_align_offset;   // offset for huge page alignment (only used for alignment > MI_ALIGNMENT_MAX)
 
   bool              allow_decommit;     
   mi_msecs_t        decommit_expire;
@@ -376,9 +381,10 @@ typedef struct mi_segment_s {
 
   // layout like this to optimize access in `mi_free`
   mi_segment_kind_t kind;
-  _Atomic(mi_threadid_t) thread_id;      // unique id of the thread owning this segment
   size_t            slice_entries;       // entries in the `slices` array, at most `MI_SLICES_PER_SEGMENT`
-  mi_slice_t        slices[MI_SLICES_PER_SEGMENT];
+  _Atomic(mi_threadid_t) thread_id;      // unique id of the thread owning this segment
+
+  mi_slice_t        slices[MI_SLICES_PER_SEGMENT+1];  // one more for huge blocks with large alignment
 } mi_segment_t;
 
 
@@ -412,6 +418,7 @@ typedef struct mi_random_cxt_s {
   uint32_t input[16];
   uint32_t output[16];
   int      output_available;
+  bool     weak;
 } mi_random_ctx_t;
 
 

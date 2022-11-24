@@ -19,12 +19,12 @@ const mi_page_t _mi_page_empty = {
   false,   // is_zero
   0,       // retire_expire
   NULL,    // free
-  #if MI_ENCODE_FREELIST
-  { 0, 0 },
-  #endif
   0,       // used
   0,       // xblock_size
   NULL,    // local_free
+  #if MI_ENCODE_FREELIST
+  { 0, 0 },
+  #endif
   MI_ATOMIC_VAR_INIT(0), // xthread_free
   MI_ATOMIC_VAR_INIT(0), // xheap
   NULL, NULL
@@ -111,7 +111,7 @@ mi_decl_cache_align const mi_heap_t _mi_heap_empty = {
   0,                // cookie
   0,                // arena id
   { 0, 0 },         // keys
-  { {0}, {0}, 0 },
+  { {0}, {0}, 0, true }, // random
   0,                // page count
   MI_BIN_FULL, 0,   // page retired min/max
   NULL,             // next
@@ -152,7 +152,7 @@ mi_heap_t _mi_heap_main = {
   0,                // initial cookie
   0,                // arena id
   { 0, 0 },         // the key of the main heap can be fixed (unlike page keys that need to be secure!)
-  { {0x846ca68b}, {0}, 0 },  // random
+  { {0x846ca68b}, {0}, 0, true },  // random
   0,                // page count
   MI_BIN_FULL, 0,   // page retired min/max
   NULL,             // next heap
@@ -167,8 +167,13 @@ mi_stats_t _mi_stats_main = { MI_STATS_NULL };
 static void mi_heap_main_init(void) {
   if (_mi_heap_main.cookie == 0) {
     _mi_heap_main.thread_id = _mi_thread_id();
-    _mi_heap_main.cookie = _mi_os_random_weak((uintptr_t)&mi_heap_main_init);
-    _mi_random_init(&_mi_heap_main.random);
+    _mi_heap_main.cookie = 1;
+    #if defined(_WIN32) && !defined(MI_SHARED_LIB)
+      _mi_random_init_weak(&_mi_heap_main.random);    // prevent allocation failure during bcrypt dll initialization with static linking
+    #else
+      _mi_random_init(&_mi_heap_main.random);
+    #endif
+    _mi_heap_main.cookie  = _mi_heap_random_next(&_mi_heap_main);
     _mi_heap_main.keys[0] = _mi_heap_random_next(&_mi_heap_main);
     _mi_heap_main.keys[1] = _mi_heap_random_next(&_mi_heap_main);
   }
@@ -531,12 +536,13 @@ static void mi_process_load(void) {
   MI_UNUSED(dummy);
   #endif
   os_preloading = false;
+  mi_assert_internal(_mi_is_main_thread());
   #if !(defined(_WIN32) && defined(MI_SHARED_LIB))  // use Dll process detach (see below) instead of atexit (issue #521)
   atexit(&mi_process_done);  
   #endif
   _mi_options_init();
-  mi_process_init();
-  //mi_stats_reset();-
+  mi_process_setup_auto_thread_done();
+  mi_process_init();  
   if (mi_redirected) _mi_verbose_message("malloc is redirected.\n");
 
   // show message from the redirector (if present)
@@ -545,6 +551,9 @@ static void mi_process_load(void) {
   if (msg != NULL && (mi_option_is_enabled(mi_option_verbose) || mi_option_is_enabled(mi_option_show_errors))) {
     _mi_fputs(NULL,NULL,NULL,msg);
   }
+
+  // reseed random
+  _mi_random_reinit_if_weak(&_mi_heap_main.random);
 }
 
 #if defined(_WIN32) && (defined(_M_IX86) || defined(_M_X64))
@@ -571,7 +580,6 @@ void mi_process_init(void) mi_attr_noexcept {
   _mi_process_is_initialized = true;
   mi_process_setup_auto_thread_done();
 
-  
   mi_detect_cpu_features();
   mi_heap_main_init();
   #if (MI_DEBUG)
@@ -618,7 +626,7 @@ static void mi_cdecl mi_process_done(void) {
   #if defined(_WIN32) && !defined(MI_SHARED_LIB)
   FlsFree(mi_fls_key);  // call thread-done on all threads (except the main thread) to prevent dangling callback pointer if statically linked with a DLL; Issue #208
   #endif
-  
+
   #ifndef MI_SKIP_COLLECT_ON_EXIT
     #if (MI_DEBUG != 0) || !defined(MI_SHARED_LIB)  
     // free all memory if possible on process exit. This is not needed for a stand-alone process
@@ -627,6 +635,14 @@ static void mi_cdecl mi_process_done(void) {
     mi_collect(true /* force */ );
     #endif
   #endif
+
+  // Forcefully release all retained memory; this can be dangerous in general if overriding regular malloc/free
+  // since after process_done there might still be other code running that calls `free` (like at_exit routines,
+  // or C-runtime termination code.
+  if (mi_option_is_enabled(mi_option_destroy_on_exit)) {
+    _mi_heap_destroy_all();                          // forcefully release all memory held by all heaps (of this thread only!)
+    _mi_segment_cache_free_all(&_mi_heap_main_get()->tld->os);  // release all cached segments
+  }
 
   if (mi_option_is_enabled(mi_option_show_stats) || mi_option_is_enabled(mi_option_verbose)) {
     mi_stats_print(NULL);

@@ -33,9 +33,10 @@ int main() {
   // invalid_free();
   // test_reserved();
   // negative_stat();
+  // test_heap_walk();
   // alloc_huge();
   // test_heap_walk();
-  test_heap_arena();
+  // test_heap_arena();
   
   void* p1 = malloc(78);
   void* p2 = malloc(24);
@@ -207,7 +208,7 @@ static bool test_visit(const mi_heap_t* heap, const mi_heap_area_t* area, void* 
 
 static void test_heap_walk(void) {
   mi_heap_t* heap = mi_heap_new();
-  //mi_heap_malloc(heap, 2097152);
+  mi_heap_malloc(heap, 16*2097152);
   mi_heap_malloc(heap, 2067152);
   mi_heap_malloc(heap, 2097160);
   mi_heap_malloc(heap, 24576);
