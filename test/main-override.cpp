@@ -185,7 +185,7 @@ static void strdup_test() {
 // Issue #202
 static void heap_no_delete_worker() {
   mi_heap_t* heap = mi_heap_new();
-  void* q = mi_heap_malloc(heap, 1024);
+  void* q = mi_heap_malloc(heap, 1024); (void)(q);
   // mi_heap_delete(heap); // uncomment to prevent assertion
 }
 
@@ -249,23 +249,10 @@ static void heap_thread_free_huge_worker() {
 static void heap_thread_free_huge() {
   for (int i = 0; i < 100; i++) {
     shared_p = mi_malloc(1024 * 1024 * 1024);
-    auto t1 = std::thread(heap_thread_free_large_worker);
+    auto t1 = std::thread(heap_thread_free_huge_worker);
     t1.join();
   }
 }
-
-static void heap_thread_free_huge_worker() {
-  mi_free(shared_p);
-}
-
-static void heap_thread_free_huge() {
-  for (int i = 0; i < 10; i++) {
-    shared_p = mi_malloc(1024 * 1024 * 1024);
-    auto t1 = std::thread(heap_thread_free_large_worker);
-    t1.join();
-  }
-}
-
 
 static void test_mt_shutdown()
 {
