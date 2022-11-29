@@ -41,6 +41,7 @@ common_cflags = [
     "-fno-emulated-tls",
 
     // The following flags are for avoiding errors when compiling.
+    "-Wno-static-in-inline",
     "-Wno-unused-parameter",
     "-Wno-unused-function",
     "-Wno-missing-field-initializers",
