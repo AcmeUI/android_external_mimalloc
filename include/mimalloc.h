@@ -28,10 +28,10 @@ terms of the MIT license. A copy of the license can be found in the file
   #define mi_decl_nodiscard    [[nodiscard]]
 #elif (defined(__GNUC__) && (__GNUC__ >= 4)) || defined(__clang__)  // includes clang, icc, and clang-cl
   #define mi_decl_nodiscard    __attribute__((warn_unused_result))
-#elif defined(_HAS_NODISCARD)  
+#elif defined(_HAS_NODISCARD)
   #define mi_decl_nodiscard    _NODISCARD
 #elif (_MSC_VER >= 1700)
-  #define mi_decl_nodiscard    _Check_return_  
+  #define mi_decl_nodiscard    _Check_return_
 #else
   #define mi_decl_nodiscard
 #endif
@@ -163,8 +163,8 @@ mi_decl_export void mi_thread_init(void)      mi_attr_noexcept;
 mi_decl_export void mi_thread_done(void)      mi_attr_noexcept;
 mi_decl_export void mi_thread_stats_print_out(mi_output_fun* out, void* arg) mi_attr_noexcept;
 
-mi_decl_export void mi_process_info(size_t* elapsed_msecs, size_t* user_msecs, size_t* system_msecs, 
-                                    size_t* current_rss, size_t* peak_rss, 
+mi_decl_export void mi_process_info(size_t* elapsed_msecs, size_t* user_msecs, size_t* system_msecs,
+                                    size_t* current_rss, size_t* peak_rss,
                                     size_t* current_commit, size_t* peak_commit, size_t* page_faults) mi_attr_noexcept;
 
 // -------------------------------------------------------------------------------------
@@ -288,6 +288,7 @@ mi_decl_export int   mi_reserve_os_memory_ex(size_t size, bool commit, bool allo
 mi_decl_export bool  mi_manage_os_memory_ex(void* start, size_t size, bool is_committed, bool is_large, bool is_zero, int numa_node, bool exclusive, mi_arena_id_t* arena_id) mi_attr_noexcept;
 
 #if MI_MALLOC_VERSION >= 200
+// Create a heap that only allocates in the specified arena
 mi_decl_nodiscard mi_decl_export mi_heap_t* mi_heap_new_in_arena(mi_arena_id_t arena_id);
 #endif
 
@@ -434,7 +435,7 @@ template<class T> struct _mi_stl_allocator_common {
   typedef value_type const& const_reference;
   typedef value_type*       pointer;
   typedef value_type const* const_pointer;
-  
+
   #if ((__cplusplus >= 201103L) || (_MSC_VER > 1900))  // C++11
   using propagate_on_container_copy_assignment = std::true_type;
   using propagate_on_container_move_assignment = std::true_type;
@@ -483,12 +484,12 @@ template<class T1,class T2> bool operator!=(const mi_stl_allocator<T1>& , const 
 #include <memory>      // std::shared_ptr
 
 // Common base class for STL allocators in a specific heap
-template<class T> struct _mi_heap_stl_allocator_common : public _mi_stl_allocator_common<T> {
+template<class T, bool destroy> struct _mi_heap_stl_allocator_common : public _mi_stl_allocator_common<T> {
   using typename _mi_stl_allocator_common<T>::size_type;
   using typename _mi_stl_allocator_common<T>::value_type;
   using typename _mi_stl_allocator_common<T>::pointer;
 
-  _mi_heap_stl_allocator_common(mi_heap_t* hp) : heap(hp) { }    /* will not delete or destroy the passed in heap */
+  _mi_heap_stl_allocator_common(mi_heap_t* hp) : heap(hp) { }    /* will not delete nor destroy the passed in heap */
 
   #if (__cplusplus >= 201703L)  // C++17
   mi_decl_nodiscard T* allocate(size_type count) { return static_cast<T*>(mi_heap_alloc_new_n(this->heap.get(), count, sizeof(T))); }
@@ -502,18 +503,18 @@ template<class T> struct _mi_heap_stl_allocator_common : public _mi_stl_allocato
   #endif
 
   void collect(bool force) { mi_heap_collect(this->heap.get(), force); }
-  template<class U> bool is_equal(const _mi_heap_stl_allocator_common<U>& x) { return (this->heap == x.heap); }
+  template<class U> bool is_equal(const _mi_heap_stl_allocator_common<U, destroy>& x) const { return (this->heap == x.heap); }
 
 protected:
   std::shared_ptr<mi_heap_t> heap;
-  template<class U> friend struct _mi_heap_stl_allocator_common;
+  template<class U, bool D> friend struct _mi_heap_stl_allocator_common;
   
-  _mi_heap_stl_allocator_common(bool destroy) {
+  _mi_heap_stl_allocator_common() {
     mi_heap_t* hp = mi_heap_new();
     this->heap.reset(hp, (destroy ? &heap_destroy : &heap_delete));  /* calls heap_delete/destroy when the refcount drops to zero */
   }
   _mi_heap_stl_allocator_common(const _mi_heap_stl_allocator_common& x) mi_attr_noexcept : heap(x.heap) { }
-  template<class U> _mi_heap_stl_allocator_common(const _mi_heap_stl_allocator_common<U>& x) mi_attr_noexcept : heap(x.heap) { }
+  template<class U> _mi_heap_stl_allocator_common(const _mi_heap_stl_allocator_common<U, destroy>& x) mi_attr_noexcept : heap(x.heap) { }
 
 private:
   static void heap_delete(mi_heap_t* hp)  { if (hp != NULL) { mi_heap_delete(hp); } }
@@ -521,11 +522,11 @@ private:
 };
 
 // STL allocator allocation in a specific heap
-template<class T> struct mi_heap_stl_allocator : public _mi_heap_stl_allocator_common<T> {
-  using typename _mi_heap_stl_allocator_common<T>::size_type;
-  mi_heap_stl_allocator() : _mi_heap_stl_allocator_common<T>(false) { }            /* delete on destruction */
-  mi_heap_stl_allocator(mi_heap_t* hp) : _mi_heap_stl_allocator_common<T>(hp) { }  /* no delete or destroy on the passed in heap */
-  template<class U> mi_heap_stl_allocator(const mi_heap_stl_allocator<U>& x) mi_attr_noexcept : _mi_heap_stl_allocator_common<T>(x) { }
+template<class T> struct mi_heap_stl_allocator : public _mi_heap_stl_allocator_common<T, false> {
+  using typename _mi_heap_stl_allocator_common<T, false>::size_type;
+  mi_heap_stl_allocator() : _mi_heap_stl_allocator_common<T, false>() { } // creates fresh heap that is deleted when the destructor is called
+  mi_heap_stl_allocator(mi_heap_t* hp) : _mi_heap_stl_allocator_common<T, false>(hp) { }  // no delete nor destroy on the passed in heap 
+  template<class U> mi_heap_stl_allocator(const mi_heap_stl_allocator<U>& x) mi_attr_noexcept : _mi_heap_stl_allocator_common<T, false>(x) { }
 
   mi_heap_stl_allocator select_on_container_copy_construction() const { return *this; }
   void deallocate(T* p, size_type) { mi_free(p); }
@@ -536,12 +537,13 @@ template<class T1, class T2> bool operator==(const mi_heap_stl_allocator<T1>& x,
 template<class T1, class T2> bool operator!=(const mi_heap_stl_allocator<T1>& x, const mi_heap_stl_allocator<T2>& y) mi_attr_noexcept { return (!x.is_equal(y)); }
 
 
-// STL allocator allocation in a specific heap, where `free` does nothing and 
+// STL allocator allocation in a specific heap, where `free` does nothing and
 // the heap is destroyed in one go on destruction -- use with care!
-template<class T> struct mi_heap_destroy_stl_allocator : public _mi_heap_stl_allocator_common<T> {
-  using typename _mi_heap_stl_allocator_common<T>::size_type;
-  mi_heap_destroy_stl_allocator() : _mi_heap_stl_allocator_common<T>(true) { }   /* destroy on destruction */
-  template<class U> mi_heap_destroy_stl_allocator(const mi_heap_destroy_stl_allocator<U>& x) mi_attr_noexcept : _mi_heap_stl_allocator_common<T>(x) { }
+template<class T> struct mi_heap_destroy_stl_allocator : public _mi_heap_stl_allocator_common<T, true> {
+  using typename _mi_heap_stl_allocator_common<T, true>::size_type;
+  mi_heap_destroy_stl_allocator() : _mi_heap_stl_allocator_common<T, true>() { } // creates fresh heap that is destroyed when the destructor is called
+  mi_heap_destroy_stl_allocator(mi_heap_t* hp) : _mi_heap_stl_allocator_common<T, true>(hp) { }  // no delete nor destroy on the passed in heap 
+  template<class U> mi_heap_destroy_stl_allocator(const mi_heap_destroy_stl_allocator<U>& x) mi_attr_noexcept : _mi_heap_stl_allocator_common<T, true>(x) { }
 
   mi_heap_destroy_stl_allocator select_on_container_copy_construction() const { return *this; }
   void deallocate(T*, size_type) { /* do nothing as we destroy the heap on destruct. */ }
