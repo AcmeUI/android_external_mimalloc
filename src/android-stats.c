@@ -15,8 +15,8 @@
 //
 
 #include "mimalloc.h"
-#include "mimalloc-internal.h"
-#include "mimalloc-atomic.h"
+#include "mimalloc/internal.h"
+#include "mimalloc/atomic.h"
 
 inline void _mi_stat_decrease(mi_stat_count_t* stat, size_t amount) {};
 inline void _mi_stat_increase(mi_stat_count_t* stat, size_t amount) {};

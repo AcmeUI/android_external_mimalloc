@@ -15,8 +15,8 @@
 //
 
 #include "mimalloc.h"
-#include "mimalloc-internal.h"
-#include "mimalloc-atomic.h"
+#include "mimalloc/internal.h"
+#include "mimalloc/atomic.h"
 
 #if defined(__ANDROID__)
 mi_decl_nodiscard inline long mi_option_get(mi_option_t option)
