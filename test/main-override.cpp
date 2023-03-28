@@ -37,7 +37,7 @@ static void fail_aslr();              // issue #372
 static void tsan_numa_test();         // issue #414
 static void strdup_test();            // issue #445 
 static void bench_alloc_large(void);  // issue #xxx
-static void test_large_migrate(void); // issue #691
+//static void test_large_migrate(void); // issue #691
 static void heap_thread_free_huge();
 static void test_std_string();        // issue #697
 
@@ -45,7 +45,7 @@ static void test_stl_allocators();
 
 
 int main() {
-  mi_stats_reset();  // ignore earlier allocations  
+  // mi_stats_reset();  // ignore earlier allocations
   
   // test_std_string();
   // heap_thread_free_huge();
@@ -62,11 +62,11 @@ int main() {
   */
   // test_stl_allocators();
   // test_mt_shutdown();
-  test_large_migrate();
+  // test_large_migrate();
   
   //fail_aslr();
-  bench_alloc_large();
-  mi_stats_print(NULL);
+  // bench_alloc_large();
+  // mi_stats_print(NULL);
   return 0;
 }
 
@@ -181,7 +181,7 @@ static void test_stl_allocators() {
 #endif
 }
 
-
+#if 0
 // issue #691
 static char* cptr;
 
@@ -215,6 +215,7 @@ static void test_large_migrate(void) {
   */
   return;
 }
+#endif
 
 // issue 445
 static void strdup_test() {
