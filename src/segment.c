@@ -397,8 +397,10 @@ static void mi_segment_os_free(mi_segment_t* segment, mi_segments_tld_t* tld) {
   if (size != MI_SEGMENT_SIZE || segment->mem_align_offset != 0 || segment->kind == MI_SEGMENT_HUGE || // only push regular segments on the cache
        !_mi_segment_cache_push(segment, size, segment->memid, &segment->commit_mask, &segment->decommit_mask, segment->mem_is_large, segment->mem_is_pinned, tld->os)) 
   {
-    const size_t csize = _mi_commit_mask_committed_size(&segment->commit_mask, size);
-    if (csize > 0 && !segment->mem_is_pinned) _mi_stat_decrease(&_mi_stats_main.committed, csize);
+    if (!segment->mem_is_pinned) {
+      const size_t csize = _mi_commit_mask_committed_size(&segment->commit_mask, size);
+      if (csize > 0) { _mi_stat_decrease(&_mi_stats_main.committed, csize); }
+    }
     _mi_abandoned_await_readers();  // wait until safe to free
     _mi_arena_free(segment, mi_segment_size(segment), segment->mem_alignment, segment->mem_align_offset, segment->memid, segment->mem_is_pinned /* pretend not committed to not double count decommits */, tld->stats);
   }
@@ -1068,7 +1070,7 @@ We maintain a global list of abandoned segments that are
 reclaimed on demand. Since this is shared among threads
 the implementation needs to avoid the A-B-A problem on
 popping abandoned segments: <https://en.wikipedia.org/wiki/ABA_problem>
-We use tagged pointers to avoid accidentially identifying
+We use tagged pointers to avoid accidentally identifying
 reused segments, much like stamped references in Java.
 Secondly, we maintain a reader counter to avoid resetting
 or decommitting segments that have a pending read operation.

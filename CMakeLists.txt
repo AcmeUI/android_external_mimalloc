@@ -25,7 +25,7 @@ option(MI_BUILD_OBJECT      "Build object library" ON)
 option(MI_BUILD_TESTS       "Build test executables" ON)
 option(MI_DEBUG_TSAN        "Build with thread sanitizer (needs clang)" OFF)
 option(MI_DEBUG_UBSAN       "Build with undefined-behavior sanitizer (needs clang++)" OFF)
-option(MI_SKIP_COLLECT_ON_EXIT, "Skip collecting memory on program exit" OFF)
+option(MI_SKIP_COLLECT_ON_EXIT "Skip collecting memory on program exit" OFF)
 option(MI_NO_PADDING        "Force no use of padding even in DEBUG mode etc." OFF)
 
 # deprecated options
@@ -262,6 +262,11 @@ if(MI_USE_CXX)
   endif()
 endif()
 
+if(CMAKE_SYSTEM_NAME MATCHES "Haiku")
+   SET(CMAKE_INSTALL_LIBDIR ~/config/non-packaged/lib)
+   SET(CMAKE_INSTALL_INCLUDEDIR ~/config/non-packaged/headers)
+ endif()
+
 # Compiler flags
 if(CMAKE_C_COMPILER_ID MATCHES "AppleClang|Clang|GNU")
   list(APPEND mi_cflags -Wall -Wextra -Wno-unknown-pragmas -fvisibility=hidden)
@@ -457,12 +462,20 @@ if (MI_BUILD_OBJECT)
       $<INSTALL_INTERFACE:${mi_install_incdir}>
   )
 
+  # Copy the generated object file (`static.o`) to the output directory (as `mimalloc.o`)
+  if(NOT WIN32)
+    set(mimalloc-obj-static "${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/mimalloc-obj.dir/src/static.c${CMAKE_C_OUTPUT_EXTENSION}")
+    set(mimalloc-obj-out    "${CMAKE_CURRENT_BINARY_DIR}/${mi_basename}${CMAKE_C_OUTPUT_EXTENSION}")
+    add_custom_command(OUTPUT ${mimalloc-obj-out} DEPENDS mimalloc-obj COMMAND "${CMAKE_COMMAND}" -E copy "${mimalloc-obj-static}" "${mimalloc-obj-out}")
+    add_custom_target(mimalloc-obj-target ALL DEPENDS ${mimalloc-obj-out})      
+  endif()
+
   # the following seems to lead to cmake warnings/errors on some systems, disable for now :-(
   # install(TARGETS mimalloc-obj EXPORT mimalloc DESTINATION ${mi_install_objdir})
 
   # the FILES expression can also be: $<TARGET_OBJECTS:mimalloc-obj>
   # but that fails cmake versions less than 3.10 so we leave it as is for now
-  install(FILES ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/mimalloc-obj.dir/src/static.c${CMAKE_C_OUTPUT_EXTENSION}
+  install(FILES ${mimalloc-obj-static}
           DESTINATION ${mi_install_objdir}
           RENAME ${mi_basename}${CMAKE_C_OUTPUT_EXTENSION} )
 endif()

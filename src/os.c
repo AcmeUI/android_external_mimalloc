@@ -403,7 +403,7 @@ static bool mi_os_resetx(void* addr, size_t size, bool reset, mi_stats_t* stats)
         else _mi_stat_decrease(&stats->reset, csize);
   if (!reset) return true; // nothing to do on unreset!
 
-  #if (MI_DEBUG>1) && !MI_TRACK_ENABLED
+  #if (MI_DEBUG>1) && !MI_TRACK_ENABLED // && !MI_TSAN
   if (MI_SECURE==0) {
     memset(start, 0, csize); // pretend it is eagerly reset
   }
@@ -526,7 +526,7 @@ void* _mi_os_alloc_huge_os_pages(size_t pages, int numa_node, mi_msecs_t max_mse
     void* p = NULL;
     int err = _mi_prim_alloc_huge_os_pages(addr, MI_HUGE_OS_PAGE_SIZE, numa_node, &p);
     if (err != 0) {
-      _mi_warning_message("unable to allocate huge OS page (error: %d (0x%d), address: %p, size: %zx bytes)\n", err, err, addr, MI_HUGE_OS_PAGE_SIZE);
+      _mi_warning_message("unable to allocate huge OS page (error: %d (0x%x), address: %p, size: %zx bytes)\n", err, err, addr, MI_HUGE_OS_PAGE_SIZE);
       break;
     }
 
