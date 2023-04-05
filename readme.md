@@ -12,8 +12,8 @@ is a general purpose allocator with excellent [performance](#performance) charac
 Initially developed by Daan Leijen for the runtime systems of the
 [Koka](https://koka-lang.github.io) and [Lean](https://github.com/leanprover/lean) languages.
 
-Latest release tag: `v2.1.0` (2023-03-29).
-Latest stable  tag: `v1.8.0` (2023-03-29).
+Latest release tag: `v2.1.1` (2023-04-03).
+Latest stable  tag: `v1.8.1` (2023-04-03).
 
 mimalloc is a drop-in replacement for `malloc` and can be used in other programs
 without code changes, for example, on dynamically linked ELF-based systems (Linux, BSD, etc.) you can use it as:
@@ -78,17 +78,20 @@ Note: the `v2.x` version has a new algorithm for managing internal mimalloc page
   and fragmentation compared to mimalloc `v1.x` (especially for large workloads). Should otherwise have similar performance
   (see [below](#performance)); please report if you observe any significant performance regression.
 
+* 2023-04-03, `v1.8.1`, `v2.1.1`: Fixes build issues on some platforms.
+
 * 2023-03-29, `v1.8.0`, `v2.1.0`: Improved support dynamic overriding on Windows 11. Improved tracing precision
-  with [#asan] and [#Valgrind], and added Windows event tracing [#ETW] (contributed by Xinglong He). Created an OS
+  with [asan](#asan) and [Valgrind](#valgrind), and added Windows event tracing [ETW](#ETW) (contributed by Xinglong He). Created an OS
   abstraction layer to make it easier to port and separate platform dependent code (in `src/prim`). Fixed C++ STL compilation on older Microsoft C++ compilers, and various small bug fixes.
 
-* 2022-12-23, `v1.7.9`, `v2.0.9`: Supports building with [#asan] and improved [#Valgrind] support. Support abitrary large
-  alignments (in particular for `std::pmr` pools). 
+* 2022-12-23, `v1.7.9`, `v2.0.9`: Supports building with [asan](#asan) and improved [Valgrind](#valgrind) support.
+  Support abitrary large alignments (in particular for `std::pmr` pools). 
   Added C++ STL allocators attached to a specific heap (thanks @vmarkovtsev). 
   Heap walks now visit all object (including huge objects). Support Windows nano server containers (by Johannes Schindelin,@dscho). 
   Various small bug fixes.
 
-* 2022-11-03, `v1.7.7`, `v2.0.7`: Initial support for [Valgrind] for leak testing and heap block overflow detection. Initial
+* 2022-11-03, `v1.7.7`, `v2.0.7`: Initial support for [Valgrind](#valgrind) for leak testing and heap block overflow
+  detection. Initial
   support for attaching heaps to a speficic memory area (only in v2). Fix `realloc` behavior for zero size blocks, remove restriction to integral multiple of the alignment in `alloc_align`, improved aligned allocation performance, reduced contention with many threads on few processors (thank you @dposluns!), vs2022 support, support `pkg-config`, .
 
 * 2022-04-14, `v1.7.6`, `v2.0.6`: fix fallback path for aligned OS allocation on Windows, improve Windows aligned allocation
@@ -351,95 +354,6 @@ When _mimalloc_ is built using debug mode, various checks are done at runtime to
 - Double free's, and freeing invalid heap pointers are detected.
 - Corrupted free-lists and some forms of use-after-free are detected.
 
-## Tools
-
-Generally, we recommend using the standard allocator with memory tracking tools, but mimalloc
-can also be build to support the [address sanitizer][asan] or the excellent [Valgrind] tool. 
-Moreover, it can be build to support Windows event tracing ([ETW]).
-This has a small performance overhead but does allow detecting memory leaks and byte-precise 
-buffer overflows directly on final executables. See also the `test/test-wrong.c` file to test with various tools.
-
-### Valgrind
-
-To build with valgrind support, use the `MI_TRACK_VALGRIND=ON` cmake option:
-
-```
-> cmake ../.. -DMI_TRACK_VALGRIND=ON
-```
-
-This can also be combined with secure mode or debug mode.
-You can then run your programs directly under valgrind:
-
-```
-> valgrind <myprogram>
-```
-
-If you rely on overriding `malloc`/`free` by mimalloc (instead of using the `mi_malloc`/`mi_free` API directly),
-you also need to tell `valgrind` to not intercept those calls itself, and use:
-
-```
-> MIMALLOC_SHOW_STATS=1 valgrind  --soname-synonyms=somalloc=*mimalloc* -- <myprogram>
-```
-
-By setting the `MIMALLOC_SHOW_STATS` environment variable you can check that mimalloc is indeed
-used and not the standard allocator. Even though the [Valgrind option][valgrind-soname]
-is called `--soname-synonyms`, this also
-works when overriding with a static library or object file. Unfortunately, it is not possible to
-dynamically override mimalloc using `LD_PRELOAD` together with `valgrind`.
-See also the `test/test-wrong.c` file to test with `valgrind`.
-
-Valgrind support is in its initial development -- please report any issues.
-
-[Valgrind]: https://valgrind.org/
-[valgrind-soname]: https://valgrind.org/docs/manual/manual-core.html#opt.soname-synonyms
-
-### ASAN
-
-To build with the address sanitizer, use the `-DMI_TRACK_ASAN=ON` cmake option:
-
-```
-> cmake ../.. -DMI_TRACK_ASAN=ON
-```
-
-This can also be combined with secure mode or debug mode. 
-You can then run your programs as:'
-
-```
-> ASAN_OPTIONS=verbosity=1 <myprogram>
-```
-
-When you link a program with an address sanitizer build of mimalloc, you should
-generally compile that program too with the address sanitizer enabled. 
-For example, assuming you build mimalloc in `out/debug`:
-
-```
-clang -g -o test-wrong -Iinclude test/test-wrong.c out/debug/libmimalloc-asan-debug.a -lpthread -fsanitize=address -fsanitize-recover=address
-```
-
-Since the address sanitizer redirects the standard allocation functions, on some platforms (macOSX for example)
-it is required to compile mimalloc with `-DMI_OVERRIDE=OFF`.
-Adress sanitizer support is in its initial development -- please report any issues.
-
-[asan]: https://github.com/google/sanitizers/wiki/AddressSanitizer
-
-### ETW
-
-Event tracing for Windows ([ETW]) provides a high performance way to capture all allocations though
-mimalloc and analyze them later. To build with ETW support, use the `-DMI_TRACE_ETW=ON` cmake option. 
-
-You can then capture an allocation trace using the Windows performance recorder (WPR), using the 
-`src/prim/windows/etw-mimalloc.wprp` profile. In an admin prompt, you can use:
-```
-> wpr -start src\prim\windows\etw-mimalloc.wprp -filemode
-> <my_mimalloc_program>
-> wpr -stop <my_mimalloc_program>.etl
-``` 
-and then open `<my_mimalloc_program>.etl` in the Windows Performance Analyzer (WPA), or 
-use a tool like [TraceControl] that is specialized for analyzing mimalloc traces.
-
-[ETW]: https://learn.microsoft.com/en-us/windows-hardware/test/wpt/event-tracing-for-windows
-[TraceControl]: https://github.com/xinglonghe/TraceControl
-
 
 # Overriding Standard Malloc
 
@@ -528,6 +442,96 @@ link statically to mimalloc (as shown in the introduction) and include a
 header file in each source file that re-defines `malloc` etc. to `mi_malloc`.
 This is provided by [`mimalloc-override.h`](https://github.com/microsoft/mimalloc/blob/master/include/mimalloc-override.h). This only works reliably though if all sources are
 under your control or otherwise mixing of pointers from different heaps may occur!
+
+
+## Tools
+
+Generally, we recommend using the standard allocator with memory tracking tools, but mimalloc
+can also be build to support the [address sanitizer][asan] or the excellent [Valgrind] tool. 
+Moreover, it can be build to support Windows event tracing ([ETW]).
+This has a small performance overhead but does allow detecting memory leaks and byte-precise 
+buffer overflows directly on final executables. See also the `test/test-wrong.c` file to test with various tools.
+
+### Valgrind
+
+To build with [valgrind] support, use the `MI_TRACK_VALGRIND=ON` cmake option:
+
+```
+> cmake ../.. -DMI_TRACK_VALGRIND=ON
+```
+
+This can also be combined with secure mode or debug mode.
+You can then run your programs directly under valgrind:
+
+```
+> valgrind <myprogram>
+```
+
+If you rely on overriding `malloc`/`free` by mimalloc (instead of using the `mi_malloc`/`mi_free` API directly),
+you also need to tell `valgrind` to not intercept those calls itself, and use:
+
+```
+> MIMALLOC_SHOW_STATS=1 valgrind  --soname-synonyms=somalloc=*mimalloc* -- <myprogram>
+```
+
+By setting the `MIMALLOC_SHOW_STATS` environment variable you can check that mimalloc is indeed
+used and not the standard allocator. Even though the [Valgrind option][valgrind-soname]
+is called `--soname-synonyms`, this also
+works when overriding with a static library or object file. Unfortunately, it is not possible to
+dynamically override mimalloc using `LD_PRELOAD` together with `valgrind`.
+See also the `test/test-wrong.c` file to test with `valgrind`.
+
+Valgrind support is in its initial development -- please report any issues.
+
+[Valgrind]: https://valgrind.org/
+[valgrind-soname]: https://valgrind.org/docs/manual/manual-core.html#opt.soname-synonyms
+
+### ASAN
+
+To build with the address sanitizer, use the `-DMI_TRACK_ASAN=ON` cmake option:
+
+```
+> cmake ../.. -DMI_TRACK_ASAN=ON
+```
+
+This can also be combined with secure mode or debug mode. 
+You can then run your programs as:'
+
+```
+> ASAN_OPTIONS=verbosity=1 <myprogram>
+```
+
+When you link a program with an address sanitizer build of mimalloc, you should
+generally compile that program too with the address sanitizer enabled. 
+For example, assuming you build mimalloc in `out/debug`:
+
+```
+clang -g -o test-wrong -Iinclude test/test-wrong.c out/debug/libmimalloc-asan-debug.a -lpthread -fsanitize=address -fsanitize-recover=address
+```
+
+Since the address sanitizer redirects the standard allocation functions, on some platforms (macOSX for example)
+it is required to compile mimalloc with `-DMI_OVERRIDE=OFF`.
+Adress sanitizer support is in its initial development -- please report any issues.
+
+[asan]: https://github.com/google/sanitizers/wiki/AddressSanitizer
+
+### ETW
+
+Event tracing for Windows ([ETW]) provides a high performance way to capture all allocations though
+mimalloc and analyze them later. To build with ETW support, use the `-DMI_TRACE_ETW=ON` cmake option. 
+
+You can then capture an allocation trace using the Windows performance recorder (WPR), using the 
+`src/prim/windows/etw-mimalloc.wprp` profile. In an admin prompt, you can use:
+```
+> wpr -start src\prim\windows\etw-mimalloc.wprp -filemode
+> <my_mimalloc_program>
+> wpr -stop <my_mimalloc_program>.etl
+``` 
+and then open `<my_mimalloc_program>.etl` in the Windows Performance Analyzer (WPA), or 
+use a tool like [TraceControl] that is specialized for analyzing mimalloc traces.
+
+[ETW]: https://learn.microsoft.com/en-us/windows-hardware/test/wpt/event-tracing-for-windows
+[TraceControl]: https://github.com/xinglonghe/TraceControl
 
 
 # Performance
