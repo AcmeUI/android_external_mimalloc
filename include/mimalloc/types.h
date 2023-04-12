@@ -291,8 +291,7 @@ typedef uintptr_t mi_thread_free_t;
 typedef struct mi_page_s {
   // "owned" by the segment
   uint32_t              slice_count;       // slices in this page (0 if not a page)
-  uint32_t              slice_offset;      // distance from the actual page data slice (0 if a page)
-  uint8_t               is_reset : 1;      // `true` if the page memory was reset
+  uint32_t              slice_offset;      // distance from the actual page data slice (0 if a page)  
   uint8_t               is_committed : 1;  // `true` if the page virtual memory is committed
   uint8_t               is_zero_init : 1;  // `true` if the page was zero initialized
 
@@ -350,7 +349,7 @@ typedef enum mi_segment_kind_e {
 // is still tracked in fine-grained MI_COMMIT_SIZE chunks)
 // ------------------------------------------------------
 
-#define MI_MINIMAL_COMMIT_SIZE      (16*MI_SEGMENT_SLICE_SIZE)           // 1MiB
+#define MI_MINIMAL_COMMIT_SIZE      (1*MI_SEGMENT_SLICE_SIZE)            
 #define MI_COMMIT_SIZE              (MI_SEGMENT_SLICE_SIZE)              // 64KiB
 #define MI_COMMIT_MASK_BITS         (MI_SEGMENT_SIZE / MI_COMMIT_SIZE)  
 #define MI_COMMIT_MASK_FIELD_BITS    MI_SIZE_BITS
@@ -379,9 +378,10 @@ typedef struct mi_segment_s {
   size_t            mem_alignment;      // page alignment for huge pages (only used for alignment > MI_ALIGNMENT_MAX)
   size_t            mem_align_offset;   // offset for huge page alignment (only used for alignment > MI_ALIGNMENT_MAX)
 
-  bool              allow_decommit;     
-  mi_msecs_t        decommit_expire;
-  mi_commit_mask_t  decommit_mask;
+  bool              allow_decommit;
+  bool              allow_purge;
+  mi_msecs_t        purge_expire;
+  mi_commit_mask_t  purge_mask;
   mi_commit_mask_t  commit_mask;
 
   _Atomic(struct mi_segment_s*) abandoned_next;
@@ -540,6 +540,7 @@ typedef struct mi_stats_s {
   mi_stat_count_t reserved;
   mi_stat_count_t committed;
   mi_stat_count_t reset;
+  mi_stat_count_t purged;
   mi_stat_count_t page_committed;
   mi_stat_count_t segments_abandoned;
   mi_stat_count_t pages_abandoned;
@@ -552,6 +553,8 @@ typedef struct mi_stats_s {
   mi_stat_counter_t pages_extended;
   mi_stat_counter_t mmap_calls;
   mi_stat_counter_t commit_calls;
+  mi_stat_counter_t reset_calls;
+  mi_stat_counter_t purge_calls;
   mi_stat_counter_t page_no_retire;
   mi_stat_counter_t searches;
   mi_stat_counter_t normal_count;

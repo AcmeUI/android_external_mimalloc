@@ -26,12 +26,14 @@ mi_decl_nodiscard inline long mi_option_get(mi_option_t option)
   return -1;
   case mi_option_eager_commit_delay:
   return 1;
-  case mi_option_segment_decommit_delay:
-  return 500;
-  case mi_option_decommit_extend_delay:
+  case mi_option_purge_extend_delay:
   return 1;
-  case mi_option_decommit_delay:
-  return 25;
+  case mi_option_arena_purge_mult:
+  return 10;
+  case mi_option_purge_delay:
+  return 10;
+  case mi_option_arena_eager_commit:
+  return 2;
   default:
   return 0;
   }
@@ -44,11 +46,25 @@ mi_decl_nodiscard inline long mi_option_get_clamp(mi_option_t option, long min, 
   return min;
 }
 
+mi_decl_nodiscard size_t mi_option_get_size(mi_option_t option) {
+  switch (option) {
+    case mi_option_arena_reserve:
+#if (MI_INTPTR_SIZE>4)
+    return 1024L * 1024L * MI_KiB;
+#else
+    return  128L * 1024L * MI_KiB;
+#endif
+    default:
+    return 0;
+  }
+}
+
 mi_decl_nodiscard inline bool mi_option_is_enabled(mi_option_t option)
 {
   switch (option) {
   case mi_option_eager_commit:
-  case mi_option_allow_decommit:
+  case mi_option_allow_purge:
+  case mi_option_purge_decommits:
   return true;
   default:
   return false;

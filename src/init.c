@@ -14,7 +14,7 @@ terms of the MIT license. A copy of the license can be found in the file
 
 // Empty page used to initialize the small free pages array
 const mi_page_t _mi_page_empty = {
-  0, false, false, false, false,
+  0, false, false, false,
   0,       // capacity
   0,       // reserved capacity
   { 0 },   // flags
@@ -37,6 +37,7 @@ const mi_page_t _mi_page_empty = {
 
 #define MI_PAGE_EMPTY() ((mi_page_t*)&_mi_page_empty)
 
+#if (MI_SMALL_WSIZE_MAX==128)
 #if (MI_PADDING>0) && (MI_INTPTR_SIZE >= 8)
 #define MI_SMALL_PAGES_EMPTY  { MI_INIT128(MI_PAGE_EMPTY), MI_PAGE_EMPTY(), MI_PAGE_EMPTY() }
 #elif (MI_PADDING>0)
@@ -44,7 +45,9 @@ const mi_page_t _mi_page_empty = {
 #else
 #define MI_SMALL_PAGES_EMPTY  { MI_INIT128(MI_PAGE_EMPTY), MI_PAGE_EMPTY() }
 #endif
-
+#else
+#error "define right initialization sizes corresponding to MI_SMALL_WSIZE_MAX"
+#endif
 
 // Empty page queues for every bin
 #define QNULL(sz)  { NULL, NULL, (sz)*sizeof(uintptr_t) }
@@ -79,8 +82,9 @@ const mi_page_t _mi_page_empty = {
   MI_STAT_COUNT_NULL(), MI_STAT_COUNT_NULL(), \
   MI_STAT_COUNT_NULL(), MI_STAT_COUNT_NULL(), \
   MI_STAT_COUNT_NULL(), MI_STAT_COUNT_NULL(), \
-  { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 },     \
-  { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } \
+  MI_STAT_COUNT_NULL(), \
+  { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, \
+  { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 }, { 0, 0 } \
   MI_STAT_COUNT_END_NULL()
 
 
@@ -223,10 +227,10 @@ static mi_thread_data_t* mi_thread_data_alloc(void) {
     }
   }
   // if that fails, allocate directly from the OS
-  td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), &_mi_stats_main);
+  td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), NULL, &_mi_stats_main);
   if (td == NULL) {
     // if this fails, try once more. (issue #257)
-    td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), &_mi_stats_main);
+    td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), NULL, &_mi_stats_main);
     if (td == NULL) {
       // really out of memory
       _mi_error_message(ENOMEM, "unable to allocate thread local heap metadata (%zu bytes)\n", sizeof(mi_thread_data_t));
@@ -619,6 +623,7 @@ static void mi_cdecl mi_process_done(void) {
   if (mi_option_is_enabled(mi_option_destroy_on_exit)) {
     _mi_heap_destroy_all();                          // forcefully release all memory held by all heaps (of this thread only!)
     _mi_segment_cache_free_all(&_mi_heap_main_get()->tld->os);  // release all cached segments
+    _mi_arena_collect(true /* destroy (owned) arenas */, true /* purge the rest */, &_mi_heap_main_get()->tld->stats);
   }
 
   if (mi_option_is_enabled(mi_option_show_stats) || mi_option_is_enabled(mi_option_verbose)) {

@@ -37,6 +37,7 @@ terms of the MIT license. A copy of the license can be found in the file
 #include "random.c" 
 #include "segment.c"
 #include "segment-cache.c"
+#include "segment-map.c"
 #include "stats.c"
 #if defined(__ANDROID__)
 #include "android-stats.c"

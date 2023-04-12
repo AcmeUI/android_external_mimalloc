@@ -146,10 +146,10 @@ mi_decl_nodiscard mi_decl_restrict void* mi_heap_malloc_aligned_at(mi_heap_t* he
   return mi_heap_malloc_zero_aligned_at(heap, size, alignment, offset, false);
 }
 
-mi_decl_nodiscard mi_decl_restrict void* mi_heap_malloc_aligned(mi_heap_t* heap, size_t size, size_t alignment) mi_attr_noexcept {
+mi_decl_nodiscard mi_decl_restrict inline void* mi_heap_malloc_aligned(mi_heap_t* heap, size_t size, size_t alignment) mi_attr_noexcept {
   #if !MI_PADDING
   // without padding, any small sized allocation is naturally aligned (see also `_mi_segment_page_start`)
-  if (!_mi_is_power_of_two(alignment)) return NULL;
+  if mi_unlikely(!_mi_is_power_of_two(alignment)) return NULL;
   if mi_likely(_mi_is_power_of_two(size) && size >= alignment && size <= MI_SMALL_SIZE_MAX)
   #else
   // with padding, we can only guarantee this for fixed alignments
@@ -164,6 +164,11 @@ mi_decl_nodiscard mi_decl_restrict void* mi_heap_malloc_aligned(mi_heap_t* heap,
     return mi_heap_malloc_aligned_at(heap, size, alignment, 0);
   }
 }
+
+// ensure a definition is emitted
+#if defined(__cplusplus)
+static void* _mi_heap_malloc_aligned = (void*)&mi_heap_malloc_aligned;
+#endif
 
 // ------------------------------------------------------
 // Aligned Allocation
