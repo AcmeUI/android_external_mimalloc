@@ -203,6 +203,7 @@ mi_heap_t* _mi_heap_main_get(void) {
 typedef struct mi_thread_data_s {
   mi_heap_t  heap;  // must come first due to cast in `_mi_heap_done`
   mi_tld_t   tld;
+  mi_memid_t memid;
 } mi_thread_data_t;
 
 
@@ -214,27 +215,36 @@ typedef struct mi_thread_data_s {
 #define TD_CACHE_SIZE (8)
 static _Atomic(mi_thread_data_t*) td_cache[TD_CACHE_SIZE];
 
-static mi_thread_data_t* mi_thread_data_alloc(void) {
+static mi_thread_data_t* mi_thread_data_zalloc(void) {
   // try to find thread metadata in the cache
-  mi_thread_data_t* td;
+  bool is_zero = false;
+  mi_thread_data_t* td = NULL;
   for (int i = 0; i < TD_CACHE_SIZE; i++) {
     td = mi_atomic_load_ptr_relaxed(mi_thread_data_t, &td_cache[i]);
     if (td != NULL) {
+      // found cached allocation, try use it
       td = mi_atomic_exchange_ptr_acq_rel(mi_thread_data_t, &td_cache[i], NULL);
       if (td != NULL) {
-        return td;
+        break;
       }
     }
   }
-  // if that fails, allocate directly from the OS
-  td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), NULL, &_mi_stats_main);
+
+  // if that fails, allocate as meta data
   if (td == NULL) {
-    // if this fails, try once more. (issue #257)
-    td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), NULL, &_mi_stats_main);
+    td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), &is_zero, &_mi_stats_main);
     if (td == NULL) {
-      // really out of memory
-      _mi_error_message(ENOMEM, "unable to allocate thread local heap metadata (%zu bytes)\n", sizeof(mi_thread_data_t));
+      // if this fails, try once more. (issue #257)
+      td = (mi_thread_data_t*)_mi_os_alloc(sizeof(mi_thread_data_t), &is_zero, &_mi_stats_main);
+      if (td == NULL) {
+        // really out of memory
+        _mi_error_message(ENOMEM, "unable to allocate thread local heap metadata (%zu bytes)\n", sizeof(mi_thread_data_t));
+      }
     }
+  }
+  
+  if (td != NULL && !is_zero) {
+    _mi_memzero(td, sizeof(*td));
   }
   return td;
 }
@@ -279,10 +289,9 @@ static bool _mi_heap_init(void) {
   }
   else {
     // use `_mi_os_alloc` to allocate directly from the OS
-    mi_thread_data_t* td = mi_thread_data_alloc();
+    mi_thread_data_t* td = mi_thread_data_zalloc();
     if (td == NULL) return false;
 
-    // OS allocated so already zero initialized
     mi_tld_t*  tld = &td->tld;
     mi_heap_t* heap = &td->heap;
     _mi_memcpy_aligned(tld, &tld_empty, sizeof(*tld));
@@ -622,7 +631,6 @@ static void mi_cdecl mi_process_done(void) {
   // or C-runtime termination code.
   if (mi_option_is_enabled(mi_option_destroy_on_exit)) {
     _mi_heap_destroy_all();                          // forcefully release all memory held by all heaps (of this thread only!)
-    _mi_segment_cache_free_all(&_mi_heap_main_get()->tld->os);  // release all cached segments
     _mi_arena_collect(true /* destroy (owned) arenas */, true /* purge the rest */, &_mi_heap_main_get()->tld->stats);
   }
 

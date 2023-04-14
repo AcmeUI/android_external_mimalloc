@@ -163,10 +163,6 @@ static void mi_heap_collect_ex(mi_heap_t* heap, mi_collect_t collect)
     _mi_segment_thread_collect(&heap->tld->segments);
   }
 
-  // decommit in global segment caches
-  // note: forced decommit can be quite expensive if many threads are created/destroyed so we do not force on abandonment
-  _mi_segment_cache_collect( collect == MI_FORCE, &heap->tld->os);  
-
   // collect regions on program-exit (or shared library unload)
   if (force && _mi_is_main_thread() && mi_heap_is_backing(heap)) {
     _mi_arena_collect(false /* destroy arenas */, true /* force purge */, &heap->tld->stats);
@@ -232,7 +228,7 @@ mi_decl_nodiscard mi_heap_t* mi_heap_new(void) {
   return mi_heap_new_in_arena(_mi_arena_id_none());
 }
 
-bool _mi_heap_memid_is_suitable(mi_heap_t* heap, size_t memid) {
+bool _mi_heap_memid_is_suitable(mi_heap_t* heap, mi_memid_t memid) {
   return _mi_arena_memid_is_suitable(memid, heap->arena_id);
 }
 
