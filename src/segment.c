@@ -824,7 +824,7 @@ static mi_segment_t* mi_segment_os_alloc( size_t required, size_t page_alignment
 
   // ensure metadata part of the segment is committed  
   mi_commit_mask_t commit_mask; 
-  if (memid.was_committed) { 
+  if (memid.initially_committed) { 
     mi_commit_mask_create_full(&commit_mask);  
   }
   else { 
@@ -840,10 +840,9 @@ static mi_segment_t* mi_segment_os_alloc( size_t required, size_t page_alignment
   }
   mi_assert_internal(segment != NULL && (uintptr_t)segment % MI_SEGMENT_SIZE == 0);
 
-  mi_track_mem_undefined(segment, (*pinfo_slices) * MI_SEGMENT_SLICE_SIZE); // todo: should not be necessary?
   segment->memid = memid;
   segment->allow_decommit = !memid.is_pinned;
-  segment->allow_purge = segment->allow_decommit && mi_option_is_enabled(mi_option_allow_purge);
+  segment->allow_purge = segment->allow_decommit && (mi_option_get(mi_option_purge_delay) >= 0);
   segment->segment_size = segment_size;
   segment->commit_mask = commit_mask;
   segment->purge_expire = 0;
@@ -878,11 +877,11 @@ static mi_segment_t* mi_segment_alloc(size_t required, size_t page_alignment, mi
                                               &segment_slices, &pre_size, &info_slices, commit, tld, os_tld);
   if (segment == NULL) return NULL;
   
-  // zero the segment info? -- not always needed as it may be zero initialized from the OS 
-  if (!segment->memid.was_zero) {
+  // zero the segment info? -- not always needed as it may be zero initialized from the OS   
+  if (!segment->memid.initially_zero) {
     ptrdiff_t ofs    = offsetof(mi_segment_t, next);
     size_t    prefix = offsetof(mi_segment_t, slices) - ofs;
-    size_t    zsize  = prefix + (sizeof(mi_slice_t) * (segment_slices + 1)); // one more
+    size_t    zsize  = prefix + (sizeof(mi_slice_t) * (segment_slices + 1)); // one more  
     _mi_memzero((uint8_t*)segment + ofs, zsize);
   }
   
@@ -998,7 +997,7 @@ static mi_slice_t* mi_segment_page_clear(mi_page_t* page, mi_segments_tld_t* tld
   // zero the page data, but not the segment fields
   page->is_zero_init = false;
   ptrdiff_t ofs = offsetof(mi_page_t, capacity);
-  memset((uint8_t*)page + ofs, 0, sizeof(*page) - ofs);
+  _mi_memzero((uint8_t*)page + ofs, sizeof(*page) - ofs);
   page->xblock_size = 1;
 
   // and free it
@@ -1579,9 +1578,12 @@ void _mi_segment_huge_page_reset(mi_segment_t* segment, mi_page_t* page, mi_bloc
   mi_assert_internal(page->used == 1); // this is called just before the free
   mi_assert_internal(page->free == NULL);
   if (segment->allow_decommit) {
-    const size_t csize = mi_usable_size(block) - sizeof(mi_block_t);
-    uint8_t* p = (uint8_t*)block + sizeof(mi_block_t);
-    _mi_os_reset(p, csize, &_mi_stats_main);  // note: cannot use segment_decommit on huge segments
+    size_t csize = mi_usable_size(block);
+    if (csize > sizeof(mi_block_t)) {
+      csize = csize - sizeof(mi_block_t);
+      uint8_t* p = (uint8_t*)block + sizeof(mi_block_t);
+      _mi_os_reset(p, csize, &_mi_stats_main);  // note: cannot use segment_decommit on huge segments
+    }
   }
 }
 #endif

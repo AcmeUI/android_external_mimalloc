@@ -41,18 +41,15 @@ typedef uintptr_t mi_block_info_t;
 // A memory arena descriptor
 typedef struct mi_arena_s {
   mi_arena_id_t id;                       // arena id; 0 for non-specific
-  bool     exclusive;                     // only allow allocations if specifically for this arena
-  bool     owned;                         // if true, the arena will be released when the process exits if `mi_option_destroy_on_exit` is set.
+  mi_memid_t memid;                       // memid of the memory area
   _Atomic(uint8_t*) start;                // the start of the memory area
   size_t   block_count;                   // size of the area in arena blocks (of `MI_ARENA_BLOCK_SIZE`)
   size_t   field_count;                   // number of bitmap fields (where `field_count * MI_BITMAP_FIELD_BITS >= block_count`)
   size_t   meta_size;                     // size of the arena structure itself (including its bitmaps)
   mi_memid_t meta_memid;                  // memid of the arena structure itself (OS or static allocation)
   int      numa_node;                     // associated NUMA node
-  bool     is_zero_init;                  // is the arena zero initialized?
-  bool     is_large;                      // large- or huge OS pages (always committed)
-  bool     is_huge_alloc;                 // huge OS pages allocated by `_mi_os_alloc_huge_pages`
-  bool     allow_decommit;                // is decommit allowed? if true, is_large should be false and blocks_committed != NULL
+  bool     exclusive;                     // only allow allocations if specifically for this arena  
+  bool     is_large;                      // memory area consists of large- or huge OS pages (always committed)
   _Atomic(size_t) search_idx;             // optimization to start the search for free blocks
   _Atomic(mi_msecs_t) purge_expire;       // expiration time when blocks should be decommitted from `blocks_decommit`.  
   mi_bitmap_field_t* blocks_dirty;        // are the blocks potentially non-zero?
@@ -67,7 +64,7 @@ static mi_decl_cache_align _Atomic(mi_arena_t*) mi_arenas[MI_MAX_ARENAS];
 static mi_decl_cache_align _Atomic(size_t)      mi_arena_count; // = 0
 
 
-static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_committed, bool is_large, bool is_huge_alloc, bool is_zero, int numa_node, bool exclusive, bool owned, mi_arena_id_t* arena_id) mi_attr_noexcept;
+//static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_large, int numa_node, bool exclusive, mi_memid_t memid, mi_arena_id_t* arena_id) mi_attr_noexcept;
 
 /* -----------------------------------------------------------
   Arena id's
@@ -92,27 +89,6 @@ static bool mi_arena_id_is_suitable(mi_arena_id_t arena_id, bool arena_is_exclus
           (arena_id == req_arena_id));
 }
 
-/* -----------------------------------------------------------
-  memory id's
------------------------------------------------------------ */
-
-static mi_memid_t mi_memid_create(mi_memkind_t memkind) {
-  mi_memid_t memid;
-  _mi_memzero_var(memid);
-  memid.memkind = memkind;
-  return memid;
-}
-
-static mi_memid_t mi_memid_none(void) {
-  return mi_memid_create(MI_MEM_NONE);
-}
-
-static mi_memid_t mi_memid_create_os(bool committed) {
-  mi_memid_t memid = mi_memid_create(MI_MEM_OS);
-  memid.was_committed = committed;
-  return memid;
-}
-
 bool _mi_arena_memid_is_suitable(mi_memid_t memid, mi_arena_id_t request_arena_id) {
   if (memid.memkind == MI_MEM_ARENA) {
     return mi_arena_id_is_suitable(memid.mem.arena.id, memid.mem.arena.is_exclusive, request_arena_id);
@@ -125,7 +101,6 @@ bool _mi_arena_memid_is_suitable(mi_memid_t memid, mi_arena_id_t request_arena_i
 bool _mi_arena_memid_is_os_allocated(mi_memid_t memid) {
   return (memid.memkind == MI_MEM_OS);
 }
-
 
 /* -----------------------------------------------------------
   Arena allocations get a (currently) 16-bit memory id where the 
@@ -145,7 +120,7 @@ static size_t mi_arena_size(mi_arena_t* arena) {
 }
 
 static mi_memid_t mi_memid_create_arena(mi_arena_id_t id, bool is_exclusive, mi_bitmap_index_t bitmap_index) {
-  mi_memid_t memid = mi_memid_create(MI_MEM_ARENA);
+  mi_memid_t memid = _mi_memid_create(MI_MEM_ARENA);
   memid.mem.arena.id = id;
   memid.mem.arena.block_index = bitmap_index;
   memid.mem.arena.is_exclusive = is_exclusive;
@@ -172,9 +147,9 @@ static uint8_t mi_arena_static[MI_ARENA_STATIC_MAX];
 static _Atomic(size_t) mi_arena_static_top;
 
 static void* mi_arena_static_zalloc(size_t size, size_t alignment, mi_memid_t* memid) {
-  *memid = mi_memid_none();
+  *memid = _mi_memid_none();
   if (size == 0 || size > MI_ARENA_STATIC_MAX) return NULL;
-  if (mi_atomic_load_relaxed(&mi_arena_static_top) >= MI_ARENA_STATIC_MAX) return NULL;
+  if ((mi_atomic_load_relaxed(&mi_arena_static_top) + size) > MI_ARENA_STATIC_MAX) return NULL;
 
   // try to claim space
   if (alignment == 0) { alignment = 1; }
@@ -189,7 +164,7 @@ static void* mi_arena_static_zalloc(size_t size, size_t alignment, mi_memid_t* m
   }
 
   // success
-  *memid = mi_memid_create(MI_MEM_STATIC);
+  *memid = _mi_memid_create(MI_MEM_STATIC);
   const size_t start = _mi_align_up(oldtop, alignment);
   uint8_t* const p = &mi_arena_static[start];
   _mi_memzero(p, size);
@@ -197,28 +172,27 @@ static void* mi_arena_static_zalloc(size_t size, size_t alignment, mi_memid_t* m
 }
 
 static void* mi_arena_meta_zalloc(size_t size, mi_memid_t* memid, mi_stats_t* stats) {
-  *memid = mi_memid_none();
+  *memid = _mi_memid_none();
 
   // try static
   void* p = mi_arena_static_zalloc(size, MI_ALIGNMENT_MAX, memid);
   if (p != NULL) return p;
 
   // or fall back to the OS
-  bool is_zero = false;
-  p = _mi_os_alloc(size, &is_zero, stats);
-  if (p != NULL) {
-    *memid = mi_memid_create_os(true);
-    if (!is_zero) { _mi_memzero_aligned(p, size); }
-    return p;
-  }
-
-  return NULL;
+  return _mi_os_alloc(size, memid, stats);
 }
 
 static void mi_arena_meta_free(void* p, mi_memid_t memid, size_t size, mi_stats_t* stats) {
-  if (memid.memkind == MI_MEM_OS) {
-    _mi_os_free(p, size, stats);
+  if (mi_memkind_is_os(memid.memkind)) {
+    _mi_os_free(p, size, memid, stats);
   }
+  else {
+    mi_assert(memid.memkind == MI_MEM_STATIC);
+  }
+}
+
+static void* mi_arena_block_start(mi_arena_t* arena, mi_bitmap_index_t bindex) {
+  return (arena->start + mi_arena_block_size(mi_bitmap_index_bit(bindex)));
 }
 
 
@@ -242,20 +216,19 @@ static bool mi_arena_try_claim(mi_arena_t* arena, size_t blocks, mi_bitmap_index
   Arena Allocation
 ----------------------------------------------------------- */
 
-static mi_decl_noinline void* mi_arena_alloc_at(mi_arena_t* arena, size_t arena_index, size_t needed_bcount,
-  bool commit, mi_arena_id_t req_arena_id, mi_memid_t* memid, mi_os_tld_t* tld)
+static mi_decl_noinline void* mi_arena_try_alloc_at(mi_arena_t* arena, size_t arena_index, size_t needed_bcount,
+                                                    bool commit, mi_memid_t* memid, mi_os_tld_t* tld)
 {
   MI_UNUSED(arena_index);
   mi_assert_internal(mi_arena_id_index(arena->id) == arena_index);
-  if (!mi_arena_id_is_suitable(arena->id, arena->exclusive, req_arena_id)) return NULL;
 
   mi_bitmap_index_t bitmap_index;
   if (!mi_arena_try_claim(arena, needed_bcount, &bitmap_index)) return NULL;
 
   // claimed it! 
-  void* p = arena->start + mi_arena_block_size(mi_bitmap_index_bit(bitmap_index));
+  void* p = mi_arena_block_start(arena, bitmap_index);
   *memid = mi_memid_create_arena(arena->id, arena->exclusive, bitmap_index);
-  memid->is_pinned = (arena->is_large || !arena->allow_decommit);
+  memid->is_pinned = arena->memid.is_pinned;
 
   // none of the claimed blocks should be scheduled for a decommit
   if (arena->blocks_purge != NULL) {
@@ -264,107 +237,95 @@ static mi_decl_noinline void* mi_arena_alloc_at(mi_arena_t* arena, size_t arena_
   }
 
   // set the dirty bits (todo: no need for an atomic op here?)
-  memid->was_zero = _mi_bitmap_claim_across(arena->blocks_dirty, arena->field_count, needed_bcount, bitmap_index, NULL);
+  if (arena->memid.initially_zero && arena->blocks_dirty != NULL) {
+    memid->initially_zero = _mi_bitmap_claim_across(arena->blocks_dirty, arena->field_count, needed_bcount, bitmap_index, NULL);
+  }
 
   // set commit state
   if (arena->blocks_committed == NULL) {
     // always committed
-    memid->was_committed = true;    
+    memid->initially_committed = true;
   }
   else if (commit) {
     // commit requested, but the range may not be committed as a whole: ensure it is committed now
-    memid->was_committed = true;
+    memid->initially_committed = true;
     bool any_uncommitted;
     _mi_bitmap_claim_across(arena->blocks_committed, arena->field_count, needed_bcount, bitmap_index, &any_uncommitted);
     if (any_uncommitted) {
       bool commit_zero = false;
       if (!_mi_os_commit(p, mi_arena_block_size(needed_bcount), &commit_zero, tld->stats)) {
-        memid->was_committed = false;
+        memid->initially_committed = false;
       }
       else {
-        if (commit_zero) { memid->was_zero = true; }
+        if (commit_zero) { memid->initially_zero = true; }
       }
     }
   }
   else {
     // no need to commit, but check if already fully committed
-    memid->was_committed = _mi_bitmap_is_claimed_across(arena->blocks_committed, arena->field_count, needed_bcount, bitmap_index);    
+    memid->initially_committed = _mi_bitmap_is_claimed_across(arena->blocks_committed, arena->field_count, needed_bcount, bitmap_index);
   }
   
-  mi_track_mem_undefined(p, mi_arena_block_size(needed_bcount)); // todo: should not be needed?
   return p;
 }
 
 // allocate in a speficic arena
-static void* mi_arena_alloc_at_id(mi_arena_id_t arena_id, int numa_node, size_t size, size_t alignment, 
-                                  bool commit, bool allow_large,
-                                  mi_arena_id_t req_arena_id, mi_memid_t* memid, mi_os_tld_t* tld ) 
+static void* mi_arena_try_alloc_at_id(mi_arena_id_t arena_id, bool match_numa_node, int numa_node, size_t size, size_t alignment, 
+                                       bool commit, bool allow_large, mi_arena_id_t req_arena_id, mi_memid_t* memid, mi_os_tld_t* tld ) 
 {
   MI_UNUSED_RELEASE(alignment);
   mi_assert_internal(alignment <= MI_SEGMENT_ALIGN);
-  const size_t max_arena = mi_atomic_load_relaxed(&mi_arena_count);
   const size_t bcount = mi_block_count_of_size(size);  
   const size_t arena_index = mi_arena_id_index(arena_id);
-  mi_assert_internal(arena_index < max_arena);
+  mi_assert_internal(arena_index < mi_atomic_load_relaxed(&mi_arena_count));
   mi_assert_internal(size <= mi_arena_block_size(bcount));
-  if (arena_index >= max_arena) return NULL;
-
-  mi_arena_t* arena = mi_atomic_load_ptr_relaxed(mi_arena_t, &mi_arenas[arena_index]);
+  
+  // Check arena suitability
+  mi_arena_t* arena = mi_atomic_load_ptr_acquire(mi_arena_t, &mi_arenas[arena_index]);
   if (arena == NULL) return NULL;
-  if (arena->numa_node >= 0 && arena->numa_node != numa_node) return NULL;
   if (!allow_large && arena->is_large) return NULL;
-  return mi_arena_alloc_at(arena, arena_index, bcount, commit, req_arena_id, memid, tld);
+  if (!mi_arena_id_is_suitable(arena->id, arena->exclusive, req_arena_id)) return NULL;
+  if (req_arena_id == _mi_arena_id_none()) { // in not specific, check numa affinity
+    const bool numa_suitable = (numa_node < 0 || arena->numa_node < 0 || arena->numa_node == numa_node);
+    if (match_numa_node) { if (!numa_suitable) return NULL; }
+                    else { if (numa_suitable) return NULL; }
+  }
+
+  // try to allocate
+  void* p = mi_arena_try_alloc_at(arena, arena_index, bcount, commit, memid, tld);
+  mi_assert_internal(p == NULL || _mi_is_aligned(p, alignment));
+  return p;
 }
 
 
 // allocate from an arena with fallback to the OS
-static mi_decl_noinline void* mi_arenas_alloc(int numa_node, size_t size, size_t alignment, 
-                                               bool commit, bool allow_large,
-                                                mi_arena_id_t req_arena_id, mi_memid_t* memid, mi_os_tld_t* tld )
+static mi_decl_noinline void* mi_arena_try_alloc(int numa_node, size_t size, size_t alignment, 
+                                                  bool commit, bool allow_large,
+                                                  mi_arena_id_t req_arena_id, mi_memid_t* memid, mi_os_tld_t* tld )
 {
   MI_UNUSED(alignment);
   mi_assert_internal(alignment <= MI_SEGMENT_ALIGN);
   const size_t max_arena = mi_atomic_load_relaxed(&mi_arena_count);
-  const size_t bcount = mi_block_count_of_size(size);
   if mi_likely(max_arena == 0) return NULL;
-  mi_assert_internal(size <= mi_arena_block_size(bcount));
-
-  size_t arena_index = mi_arena_id_index(req_arena_id);
-  if (arena_index < MI_MAX_ARENAS && arena_index < max_arena) {
-    // try a specific arena if requested
-    mi_arena_t* arena = mi_atomic_load_ptr_acquire(mi_arena_t, &mi_arenas[arena_index]);
-    if ((arena != NULL) &&
-        // (arena->numa_node < 0 || arena->numa_node == numa_node) && // numa local?
-        (allow_large || !arena->is_large)) // large OS pages allowed, or the arena does not consist of large OS pages
-    {
-      void* p = mi_arena_alloc_at(arena, arena_index, bcount, commit, req_arena_id, memid, tld);
-      mi_assert_internal((uintptr_t)p % alignment == 0);
+  
+  if (req_arena_id != _mi_arena_id_none()) {
+    // try a specific arena if requested 
+    if (mi_arena_id_index(req_arena_id) < max_arena) {
+      void* p = mi_arena_try_alloc_at_id(req_arena_id, true, numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);
       if (p != NULL) return p;
     }
   }
   else {
     // try numa affine allocation
-    for (size_t i = 0; i < max_arena; i++) {
-      mi_arena_t* arena = mi_atomic_load_ptr_acquire(mi_arena_t, &mi_arenas[i]);
-      if (arena != NULL &&
-          (arena->numa_node < 0 || arena->numa_node == numa_node) && // numa local?
-          (allow_large || !arena->is_large)) // large OS pages allowed, or the arena does not consist of large OS pages
-      {
-        void* p = mi_arena_alloc_at(arena, i, bcount, commit, req_arena_id, memid, tld);
-        mi_assert_internal((uintptr_t)p % alignment == 0);
-        if (p != NULL) return p;
-      }
+    for (size_t i = 0; i < max_arena; i++) {    
+      void* p = mi_arena_try_alloc_at_id(mi_arena_id_create(i), true, numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);
+      if (p != NULL) return p;
     }
 
     // try from another numa node instead..
-    for (size_t i = 0; i < max_arena; i++) {
-      mi_arena_t* arena = mi_atomic_load_ptr_acquire(mi_arena_t, &mi_arenas[i]);
-      if (arena != NULL &&
-          (arena->numa_node >= 0 && arena->numa_node != numa_node) && // not numa local!
-          (allow_large || !arena->is_large)) // large OS pages allowed, or the arena does not consist of large OS pages
-      {
-        void* p = mi_arena_alloc_at(arena, i, bcount, commit, req_arena_id, memid, tld);
-        mi_assert_internal((uintptr_t)p % alignment == 0);
+    if (numa_node >= 0) {  // if numa_node was < 0 (no specific affinity requested), all arena's have been tried already
+      for (size_t i = 0; i < max_arena; i++) {
+        void* p = mi_arena_try_alloc_at_id(mi_arena_id_create(i), false /* only proceed if not numa local */, numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);
         if (p != NULL) return p;
       }
     }
@@ -372,10 +333,10 @@ static mi_decl_noinline void* mi_arenas_alloc(int numa_node, size_t size, size_t
   return NULL;
 }
 
-// try to reserve a fresh arena
+// try to reserve a fresh arena space
 static bool mi_arena_reserve(size_t req_size, bool allow_large, mi_arena_id_t req_arena_id, mi_arena_id_t *arena_id)
 {
-  if (_mi_preloading()) return false;
+  if (_mi_preloading()) return false;  // use OS only while pre loading
   if (req_arena_id != _mi_arena_id_none()) return false;
 
   const size_t arena_count = mi_atomic_load_acquire(&mi_arena_count);
@@ -407,22 +368,25 @@ void* _mi_arena_alloc_aligned(size_t size, size_t alignment, size_t align_offset
 {
   mi_assert_internal(memid != NULL && tld != NULL);
   mi_assert_internal(size > 0);
-  *memid = mi_memid_none();
+  *memid = _mi_memid_none();
 
   const int numa_node = _mi_os_numa_node(tld); // current numa node
 
   // try to allocate in an arena if the alignment is small enough and the object is not too small (as for heap meta data)
   if (size >= MI_ARENA_MIN_OBJ_SIZE && alignment <= MI_SEGMENT_ALIGN && align_offset == 0) {
-    void* p = mi_arenas_alloc(numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);
-    if (p != NULL) return p;
+    void* p = mi_arena_try_alloc(numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);
+    if (p != NULL) return p;    
 
     // otherwise, try to first eagerly reserve a new arena 
-    mi_arena_id_t arena_id = 0;
-    if (mi_arena_reserve(size,allow_large,req_arena_id,&arena_id)) { 
-      // and try allocate in there
-      p = mi_arena_alloc_at_id(arena_id, numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);        
-      if (p != NULL) return p;
-    }    
+    if (req_arena_id == _mi_arena_id_none()) {
+      mi_arena_id_t arena_id = 0;
+      if (mi_arena_reserve(size, allow_large, req_arena_id, &arena_id)) {
+        // and try allocate in there
+        mi_assert_internal(req_arena_id == _mi_arena_id_none());
+        p = mi_arena_try_alloc_at_id(arena_id, true, numa_node, size, alignment, commit, allow_large, req_arena_id, memid, tld);
+        if (p != NULL) return p;
+      }
+    }
   }
 
   // if we cannot use OS allocation, return NULL
@@ -432,17 +396,12 @@ void* _mi_arena_alloc_aligned(size_t size, size_t alignment, size_t align_offset
   }
    
   // finally, fall back to the OS
-  bool os_is_large = false;
-  bool os_is_zero = false;
-  void* p = _mi_os_alloc_aligned_at_offset(size, alignment, align_offset, commit, allow_large, &os_is_large, &os_is_zero, tld->stats);
-  if (p != NULL) { 
-    *memid = mi_memid_create_os(commit);
-    memid->is_pinned = os_is_large;
-    memid->was_zero = os_is_zero;
-    memid->mem.os.alignment = alignment;
-    memid->mem.os.align_offset = align_offset;
+  if (align_offset > 0) {
+    return _mi_os_alloc_aligned_at_offset(size, alignment, align_offset, commit, allow_large, memid, tld->stats);
   }
-  return p;
+  else {
+    return _mi_os_alloc_aligned(size, alignment, commit, allow_large, memid, tld->stats);
+  }  
 }
 
 void* _mi_arena_alloc(size_t size, bool commit, bool allow_large, mi_arena_id_t req_arena_id, mi_memid_t* memid, mi_os_tld_t* tld)
@@ -466,13 +425,19 @@ void* mi_arena_area(mi_arena_id_t arena_id, size_t* size) {
   Arena purge
 ----------------------------------------------------------- */
 
+static long mi_arena_purge_delay(void) {
+  // <0 = no purging allowed, 0=immediate purging, >0=milli-second delay
+  return (mi_option_get(mi_option_purge_delay) * mi_option_get(mi_option_arena_purge_mult));
+}
+
 // reset or decommit in an arena and update the committed/decommit bitmaps
+// assumes we own the area (i.e. blocks_in_use is claimed by us)
 static void mi_arena_purge(mi_arena_t* arena, size_t bitmap_idx, size_t blocks, mi_stats_t* stats) {
   mi_assert_internal(arena->blocks_committed != NULL);
   mi_assert_internal(arena->blocks_purge != NULL);
-  mi_assert_internal(arena->allow_decommit);
+  mi_assert_internal(!arena->memid.is_pinned);
   const size_t size = mi_arena_block_size(blocks);
-  void* const p = arena->start + mi_arena_block_size(mi_bitmap_index_bit(bitmap_idx));
+  void* const p = mi_arena_block_start(arena, bitmap_idx); 
   bool needs_recommit;
   if (_mi_bitmap_is_claimed_across(arena->blocks_committed, arena->field_count, blocks, bitmap_idx)) {
     // all blocks are committed, we can purge freely
@@ -481,7 +446,8 @@ static void mi_arena_purge(mi_arena_t* arena, size_t bitmap_idx, size_t blocks, 
   else {
     // some blocks are not committed -- this can happen when a partially committed block is freed 
     // in `_mi_arena_free` and it is conservatively marked as uncommitted but still scheduled for a purge
-    // we need to ensure we do not try to reset, and also not count the decommit stats (as it was already adjusted)
+    // we need to ensure we do not try to reset (as that may be invalid for uncommitted memory), 
+    // and also undo the decommit stats (as it was already adjusted)
     mi_assert_internal(mi_option_is_enabled(mi_option_purge_decommits));
     needs_recommit = _mi_os_purge_ex(p, size, false /* allow reset? */, stats);
     _mi_stat_increase(&stats->committed, size);
@@ -496,11 +462,12 @@ static void mi_arena_purge(mi_arena_t* arena, size_t bitmap_idx, size_t blocks, 
 }
 
 // Schedule a purge. This is usually delayed to avoid repeated decommit/commit calls.
+// Note: assumes we (still) own the area as we may purge immediately
 static void mi_arena_schedule_purge(mi_arena_t* arena, size_t bitmap_idx, size_t blocks, mi_stats_t* stats) {
   mi_assert_internal(arena->blocks_purge != NULL);
-  if (!mi_option_is_enabled(mi_option_allow_purge)) return;
+  const long delay = mi_arena_purge_delay();
+  if (delay < 0) return;  // is purging allowed at all?
 
-  const long delay = mi_option_get(mi_option_purge_delay) * mi_option_get(mi_option_arena_purge_mult);
   if (_mi_preloading() || delay == 0) {
     // decommit directly
     mi_arena_purge(arena, bitmap_idx, blocks, stats);    
@@ -509,7 +476,7 @@ static void mi_arena_schedule_purge(mi_arena_t* arena, size_t bitmap_idx, size_t
     // schedule decommit
     mi_msecs_t expire = mi_atomic_loadi64_relaxed(&arena->purge_expire);
     if (expire != 0) {
-      mi_atomic_add_acq_rel(&arena->purge_expire, delay/10);  // add smallish extra delay
+      mi_atomic_addi64_acq_rel(&arena->purge_expire, delay/10);  // add smallish extra delay
     }
     else {
       mi_atomic_storei64_release(&arena->purge_expire, _mi_clock_now() + delay);
@@ -518,20 +485,23 @@ static void mi_arena_schedule_purge(mi_arena_t* arena, size_t bitmap_idx, size_t
   }
 }
 
+// purge a range of blocks
 // return true if the full range was purged.
+// assumes we own the area (i.e. blocks_in_use is claimed by us)
 static bool mi_arena_purge_range(mi_arena_t* arena, size_t idx, size_t startidx, size_t bitlen, size_t purge, mi_stats_t* stats) {
   const size_t endidx = startidx + bitlen;
   size_t bitidx = startidx;
   bool all_purged = false;
   while (bitidx < endidx) {
+    // count consequetive ones in the purge mask
     size_t count = 0;
     while (bitidx + count < endidx && (purge & ((size_t)1 << (bitidx + count))) != 0) {
       count++;
     }
     if (count > 0) {
       // found range to be purged
-      const mi_bitmap_index_t bitmap_idx = mi_bitmap_index_create(idx, bitidx);
-      mi_arena_purge(arena, bitmap_idx, count, stats);
+      const mi_bitmap_index_t range_idx = mi_bitmap_index_create(idx, bitidx);
+      mi_arena_purge(arena, range_idx, count, stats);
       if (count == bitlen) {
         all_purged = true;
       }
@@ -544,13 +514,13 @@ static bool mi_arena_purge_range(mi_arena_t* arena, size_t idx, size_t startidx,
 // returns true if anything was purged
 static bool mi_arena_try_purge(mi_arena_t* arena, mi_msecs_t now, bool force, mi_stats_t* stats) 
 {
-  if (!arena->allow_decommit || arena->blocks_purge == NULL) return false;
+  if (arena->memid.is_pinned || arena->blocks_purge == NULL) return false;
   mi_msecs_t expire = mi_atomic_loadi64_relaxed(&arena->purge_expire);
   if (expire == 0) return false;
   if (!force && expire > now) return false;
 
   // reset expire (if not already set concurrently)
-  mi_atomic_cas_strong_acq_rel(&arena->purge_expire, &expire, 0);
+  mi_atomic_casi64_strong_acq_rel(&arena->purge_expire, &expire, 0);
   
   // potential purges scheduled, walk through the bitmap
   bool any_purged = false;
@@ -560,7 +530,7 @@ static bool mi_arena_try_purge(mi_arena_t* arena, mi_msecs_t now, bool force, mi
     if (purge != 0) {
       size_t bitidx = 0;
       while (bitidx < MI_BITMAP_FIELD_BITS) {
-        // find length 1 bit range
+        // find consequetive range of ones in the purge mask
         size_t bitlen = 0;
         while (bitidx + bitlen < MI_BITMAP_FIELD_BITS && (purge & ((size_t)1 << (bitidx + bitlen))) != 0) {
           bitlen++;
@@ -573,7 +543,7 @@ static bool mi_arena_try_purge(mi_arena_t* arena, mi_msecs_t now, bool force, mi
           }
           bitlen--;
         }
-        // claimed count bits at in_use
+        // actual claimed bits at `in_use`
         if (bitlen > 0) {
           // read purge again now that we have the in_use bits
           purge = mi_atomic_load_acquire(&arena->blocks_purge[i]);
@@ -581,7 +551,7 @@ static bool mi_arena_try_purge(mi_arena_t* arena, mi_msecs_t now, bool force, mi
             full_purge = false;
           }
           any_purged = true;
-          // release claimed in_use bits again
+          // release the claimed `in_use` bits again
           _mi_bitmap_unclaim(arena->blocks_inuse, arena->field_count, bitlen, bitmap_index);
         }
         bitidx += (bitlen+1);  // +1 to skip the zero (or end)
@@ -590,16 +560,15 @@ static bool mi_arena_try_purge(mi_arena_t* arena, mi_msecs_t now, bool force, mi
   }
   // if not fully purged, make sure to purge again in the future
   if (!full_purge) {
-    const long delay = mi_option_get(mi_option_purge_delay) * mi_option_get(mi_option_arena_purge_mult);
+    const long delay = mi_arena_purge_delay();
     mi_msecs_t expected = 0;
-    mi_atomic_cas_strong_acq_rel(&arena->purge_expire,&expected,_mi_clock_now() + delay);
+    mi_atomic_casi64_strong_acq_rel(&arena->purge_expire,&expected,_mi_clock_now() + delay);
   }
   return any_purged;
 }
 
 static void mi_arenas_try_purge( bool force, bool visit_all, mi_stats_t* stats ) {
-  const long delay = mi_option_get(mi_option_purge_delay) * mi_option_get(mi_option_arena_purge_mult);
-  if (_mi_preloading() || delay == 0 || !mi_option_is_enabled(mi_option_allow_purge)) return;  // nothing will be scheduled
+  if (_mi_preloading() || mi_arena_purge_delay() <= 0) return;  // nothing will be scheduled
 
   const size_t max_arena = mi_atomic_load_acquire(&mi_arena_count);
   if (max_arena == 0) return;
@@ -634,18 +603,13 @@ void _mi_arena_free(void* p, size_t size, size_t committed_size, mi_memid_t memi
   if (size==0) return;
   const bool all_committed = (committed_size == size);
   
-  if (memid.memkind == MI_MEM_OS) {
+  if (mi_memkind_is_os(memid.memkind)) {
     // was a direct OS allocation, pass through
     if (!all_committed && committed_size > 0) {
-      // if partially committed, adjust the committed stats
+      // if partially committed, adjust the committed stats (as `_mi_os_free` will increase decommit by the full size)
       _mi_stat_decrease(&stats->committed, committed_size);
     }
-    if (memid.mem.os.align_offset != 0) {
-      _mi_os_free_aligned_at_offset(p, size, memid.mem.os.alignment, memid.mem.os.align_offset, all_committed, stats);
-    }
-    else {
-      _mi_os_free(p, size, stats);
-    }
+    _mi_os_free(p, size, memid, stats);
   }
   else if (memid.memkind == MI_MEM_ARENA) {
     // allocated in an arena
@@ -672,7 +636,7 @@ void _mi_arena_free(void* p, size_t size, size_t committed_size, mi_memid_t memi
     mi_track_mem_undefined(p,size);
 
     // potentially decommit
-    if (!arena->allow_decommit || arena->blocks_committed == NULL) {
+    if (arena->memid.is_pinned || arena->blocks_committed == NULL) {
       mi_assert_internal(all_committed);
     }
     else {
@@ -699,13 +663,13 @@ void _mi_arena_free(void* p, size_t size, size_t committed_size, mi_memid_t memi
     // and make it available to others again
     bool all_inuse = _mi_bitmap_unclaim_across(arena->blocks_inuse, arena->field_count, blocks, bitmap_idx);
     if (!all_inuse) {
-      _mi_error_message(EAGAIN, "trying to free an already freed block: %p, size %zu\n", p, size);
+      _mi_error_message(EAGAIN, "trying to free an already freed arena block: %p, size %zu\n", p, size);
       return;
     };
   }
   else {
     // arena was none, external, or static; nothing to do
-    mi_assert_internal(memid.memkind <= MI_MEM_STATIC);
+    mi_assert_internal(memid.memkind < MI_MEM_OS);
   }
 
   // purge expired decommits
@@ -720,14 +684,9 @@ static void mi_arenas_unsafe_destroy(void) {
   for (size_t i = 0; i < max_arena; i++) {
     mi_arena_t* arena = mi_atomic_load_ptr_acquire(mi_arena_t, &mi_arenas[i]);
     if (arena != NULL) {
-      if (arena->owned && arena->start != NULL) {
+      if (arena->start != NULL && mi_memkind_is_os(arena->memid.memkind)) {      
         mi_atomic_store_ptr_release(mi_arena_t, &mi_arenas[i], NULL);
-        if (arena->is_huge_alloc) { 
-          _mi_os_free_huge_os_pages(arena->start, mi_arena_size(arena), &_mi_stats_main); 
-        }
-        else {
-          _mi_os_free(arena->start, mi_arena_size(arena), &_mi_stats_main); 
-        }        
+        _mi_os_free(arena->start, mi_arena_size(arena), arena->memid, &_mi_stats_main); 
       }
       else {
         new_max_arena = i;
@@ -787,21 +746,18 @@ static bool mi_arena_add(mi_arena_t* arena, mi_arena_id_t* arena_id) {
   return true;
 }
 
-static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_committed, bool is_large, bool is_huge_alloc, bool is_zero, int numa_node, bool exclusive, bool owned, mi_arena_id_t* arena_id) mi_attr_noexcept
+static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_large, int numa_node, bool exclusive, mi_memid_t memid, mi_arena_id_t* arena_id) mi_attr_noexcept
 {
   if (arena_id != NULL) *arena_id = _mi_arena_id_none();
   if (size < MI_ARENA_BLOCK_SIZE) return false;
 
   if (is_large) {
-    mi_assert_internal(is_committed);
-    is_committed = true;
+    mi_assert_internal(memid.initially_committed && memid.is_pinned);
   }
-
-  const bool allow_decommit = !is_large; // && !is_committed; // only allow decommit for initially uncommitted memory
 
   const size_t bcount = size / MI_ARENA_BLOCK_SIZE;
   const size_t fields = _mi_divide_up(bcount, MI_BITMAP_FIELD_BITS);
-  const size_t bitmaps = (allow_decommit ? 4 : 2);
+  const size_t bitmaps = (memid.is_pinned ? 2 : 4);
   const size_t asize  = sizeof(mi_arena_t) + (bitmaps*fields*sizeof(mi_bitmap_field_t));
   mi_memid_t meta_memid;
   mi_arena_t* arena   = (mi_arena_t*)mi_arena_meta_zalloc(asize, &meta_memid, &_mi_stats_main); // TODO: can we avoid allocating from the OS?
@@ -810,8 +766,8 @@ static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_committed,
   // already zero'd due to os_alloc
   // _mi_memzero(arena, asize);
   arena->id = _mi_arena_id_none();
+  arena->memid = memid;
   arena->exclusive = exclusive;
-  arena->owned = owned;
   arena->meta_size = asize;
   arena->meta_memid = meta_memid;
   arena->block_count = bcount;
@@ -819,16 +775,13 @@ static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_committed,
   arena->start = (uint8_t*)start;
   arena->numa_node    = numa_node; // TODO: or get the current numa node if -1? (now it allows anyone to allocate on -1)
   arena->is_large     = is_large;
-  arena->is_huge_alloc= is_huge_alloc;
-  arena->is_zero_init = is_zero;
-  arena->allow_decommit = allow_decommit; 
   arena->purge_expire = 0;
   arena->search_idx   = 0;
   arena->blocks_dirty = &arena->blocks_inuse[fields]; // just after inuse bitmap
-  arena->blocks_committed = (!arena->allow_decommit ? NULL : &arena->blocks_inuse[2*fields]); // just after dirty bitmap
-  arena->blocks_purge  = (!arena->allow_decommit ? NULL : &arena->blocks_inuse[3*fields]); // just after committed bitmap  
+  arena->blocks_committed = (arena->memid.is_pinned ? NULL : &arena->blocks_inuse[2*fields]); // just after dirty bitmap
+  arena->blocks_purge  = (arena->memid.is_pinned ? NULL : &arena->blocks_inuse[3*fields]); // just after committed bitmap  
   // initialize committed bitmap?
-  if (arena->blocks_committed != NULL && is_committed) {
+  if (arena->blocks_committed != NULL && arena->memid.initially_committed) {
     memset((void*)arena->blocks_committed, 0xFF, fields*sizeof(mi_bitmap_field_t)); // cast to void* to avoid atomic warning
   }
   
@@ -845,31 +798,28 @@ static bool mi_manage_os_memory_ex2(void* start, size_t size, bool is_committed,
 }
 
 bool mi_manage_os_memory_ex(void* start, size_t size, bool is_committed, bool is_large, bool is_zero, int numa_node, bool exclusive, mi_arena_id_t* arena_id) mi_attr_noexcept {
-  return mi_manage_os_memory_ex2(start,size,is_committed,is_large,false,is_zero,numa_node,exclusive,false /* not owned */, arena_id);
-}
-
-
-// Reserve a range of regular OS memory
-static int mi_reserve_os_memory_ex2(size_t size, bool commit, bool allow_large, bool exclusive, bool owned, mi_arena_id_t* arena_id) mi_attr_noexcept
-{
-  if (arena_id != NULL) *arena_id = _mi_arena_id_none();
-  size = _mi_align_up(size, MI_ARENA_BLOCK_SIZE); // at least one block
-  bool is_large = false;
-  bool is_zero = false;
-  void* start = _mi_os_alloc_aligned(size, MI_SEGMENT_ALIGN, commit, allow_large, &is_large, &is_zero, &_mi_stats_main);
-  if (start==NULL) return ENOMEM;
-  if (!mi_manage_os_memory_ex2(start, size, (is_large || commit), is_large, false, is_zero, -1, exclusive, owned, arena_id)) {
-    _mi_os_free_ex(start, size, commit, &_mi_stats_main);
-    _mi_verbose_message("failed to reserve %zu k memory\n", _mi_divide_up(size,1024));
-    return ENOMEM;
-  }
-  _mi_verbose_message("reserved %zu KiB memory%s\n", _mi_divide_up(size,1024), is_large ? " (in large os pages)" : "");
-  return 0;
+  mi_memid_t memid = _mi_memid_create(MI_MEM_EXTERNAL);
+  memid.initially_committed = is_committed;
+  memid.initially_zero = is_zero;
+  memid.is_pinned = is_large;
+  return mi_manage_os_memory_ex2(start,size,is_large,numa_node,exclusive,memid, arena_id);
 }
 
 // Reserve a range of regular OS memory
 int mi_reserve_os_memory_ex(size_t size, bool commit, bool allow_large, bool exclusive, mi_arena_id_t* arena_id) mi_attr_noexcept {
-  return mi_reserve_os_memory_ex2(size,commit,allow_large,exclusive,true /*owned*/, arena_id);
+  if (arena_id != NULL) *arena_id = _mi_arena_id_none();
+  size = _mi_align_up(size, MI_ARENA_BLOCK_SIZE); // at least one block
+  mi_memid_t memid;
+  void* start = _mi_os_alloc_aligned(size, MI_SEGMENT_ALIGN, commit, allow_large, &memid, &_mi_stats_main);
+  if (start == NULL) return ENOMEM;
+  const bool is_large = memid.is_pinned; // todo: use separate is_large field?
+  if (!mi_manage_os_memory_ex2(start, size, is_large, -1 /* numa node */, exclusive, memid, arena_id)) {
+    _mi_os_free_ex(start, size, commit, memid, &_mi_stats_main);
+    _mi_verbose_message("failed to reserve %zu k memory\n", _mi_divide_up(size, 1024));
+    return ENOMEM;
+  }
+  _mi_verbose_message("reserved %zu KiB memory%s\n", _mi_divide_up(size, 1024), is_large ? " (in large os pages)" : "");
+  return 0;
 }
 
 
@@ -928,16 +878,16 @@ int mi_reserve_huge_os_pages_at_ex(size_t pages, int numa_node, size_t timeout_m
   if (numa_node >= 0) numa_node = numa_node % _mi_os_numa_node_count();
   size_t hsize = 0;
   size_t pages_reserved = 0;
-  bool   is_zero = false;
-  void* p = _mi_os_alloc_huge_os_pages(pages, numa_node, timeout_msecs, &pages_reserved, &hsize, &is_zero);
+  mi_memid_t memid;
+  void* p = _mi_os_alloc_huge_os_pages(pages, numa_node, timeout_msecs, &pages_reserved, &hsize, &memid);
   if (p==NULL || pages_reserved==0) {
     _mi_warning_message("failed to reserve %zu GiB huge pages\n", pages);
     return ENOMEM;
   }
   _mi_verbose_message("numa node %i: reserved %zu GiB huge pages (of the %zu GiB requested)\n", numa_node, pages_reserved, pages);
 
-  if (!mi_manage_os_memory_ex2(p, hsize, true, true, true, is_zero, numa_node, exclusive, true /* owned */, arena_id)) {
-    _mi_os_free_huge_os_pages(p, hsize, &_mi_stats_main);
+  if (!mi_manage_os_memory_ex2(p, hsize, true, numa_node, exclusive, memid, arena_id)) {
+    _mi_os_free(p, hsize, memid, &_mi_stats_main);
     return ENOMEM;
   }
   return 0;

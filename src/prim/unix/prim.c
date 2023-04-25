@@ -190,7 +190,11 @@ static void* unix_mmap_prim(void* addr, size_t size, size_t try_alignment, int p
     if (hint != NULL) {
       p = mmap(hint, size, protect_flags, flags, fd, 0);
       if (p==MAP_FAILED || !_mi_is_aligned(p,try_alignment)) { 
+        #if MI_TRACK_ENABLED  // asan sometimes does not instrument errno correctly?
+        int err = 0;
+        #else
         int err = errno;
+        #endif
         _mi_warning_message("unable to directly request hinted aligned OS memory (error: %d (0x%x), size: 0x%zx bytes, alignment: 0x%zx, hint address: %p)\n", err, err, size, try_alignment, hint);
       }
       if (p!=MAP_FAILED) return p;
@@ -205,27 +209,32 @@ static void* unix_mmap_prim(void* addr, size_t size, size_t try_alignment, int p
   return NULL;
 }
 
+static int unix_mmap_fd(void) {
+  #if defined(VM_MAKE_TAG)
+  // macOS: tracking anonymous page with a specific ID. (All up to 98 are taken officially but LLVM sanitizers had taken 99)
+  int os_tag = (int)mi_option_get(mi_option_os_tag);
+  if (os_tag < 100 || os_tag > 255) { os_tag = 100; }
+  return VM_MAKE_TAG(os_tag);
+  #else
+  return -1;
+  #endif
+}
+
 static void* unix_mmap(void* addr, size_t size, size_t try_alignment, int protect_flags, bool large_only, bool allow_large, bool* is_large) {
-  void* p = NULL;
   #if !defined(MAP_ANONYMOUS)
   #define MAP_ANONYMOUS  MAP_ANON
   #endif
   #if !defined(MAP_NORESERVE)
   #define MAP_NORESERVE  0
   #endif
+  void* p = NULL;
+  const int fd = unix_mmap_fd();
   int flags = MAP_PRIVATE | MAP_ANONYMOUS;
-  int fd = -1;
   if (_mi_os_has_overcommit()) {
     flags |= MAP_NORESERVE;
   }
   #if defined(PROT_MAX)
   protect_flags |= PROT_MAX(PROT_READ | PROT_WRITE); // BSD
-  #endif
-  #if defined(VM_MAKE_TAG)
-  // macOS: tracking anonymous page with a specific ID. (All up to 98 are taken officially but LLVM sanitizers had taken 99)
-  int os_tag = (int)mi_option_get(mi_option_os_tag);
-  if (os_tag < 100 || os_tag > 255) { os_tag = 100; }
-  fd = VM_MAKE_TAG(os_tag);
   #endif
   // huge page allocation
   if ((large_only || _mi_os_use_large_page(size, try_alignment)) && allow_large) {
@@ -342,33 +351,46 @@ static void unix_mprotect_hint(int err) {
   #endif
 }
 
-int _mi_prim_commit(void* start, size_t size) {
+int _mi_prim_commit(void* start, size_t size, bool* is_zero) {
   // commit: ensure we can access the area
+  // note: we may think that *is_zero can be true since the memory
+  // was either from mmap PROT_NONE, or from decommit MADV_DONTNEED, but
+  // we sometimes call commit on a range with still partially committed
+  // memory and `mprotect` does not zero the range.
+  *is_zero = false;  
   int err = mprotect(start, size, (PROT_READ | PROT_WRITE));
-  if (err != 0) { err = errno; }  
-  unix_mprotect_hint(err);
+  if (err != 0) { 
+    err = errno; 
+    unix_mprotect_hint(err);
+  }
   return err;
 }
 
 int _mi_prim_decommit(void* start, size_t size, bool* needs_recommit) {
-  int err = 0;
-  #if defined(MADV_FREE) && !MI_DEBUG && !MI_SECURE
-    // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
-    // (on the other hand, MADV_FREE would be good enough.. it is just not reflected in the stats :-( )
+  int err = 0;  
+  // decommit: use MADV_DONTNEED as it decreases rss immediately (unlike MADV_FREE)
+  err = unix_madvise(start, size, MADV_DONTNEED);    
+  #if !MI_DEBUG && !MI_SECURE
     *needs_recommit = false;
-    err = unix_madvise(start, size, MADV_FREE);
   #else
-    // decommit: just disable access (also used in debug and secure mode to trap on illegal access)
-    *needs_recommit = true;  // needs recommit to reuse the memory
-    err = mprotect(start, size, PROT_NONE);
-    if (err != 0) { err = errno; }
+    *needs_recommit = true;
+    mprotect(start, size, PROT_NONE);
   #endif
+  /*
+  // decommit: use mmap with MAP_FIXED and PROT_NONE to discard the existing memory (and reduce rss)
+  *needs_recommit = true;
+  const int fd = unix_mmap_fd();
+  void* p = mmap(start, size, PROT_NONE, (MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE), fd, 0);
+  if (p != start) { err = errno; }    
+  */
   return err;
 }
 
 int _mi_prim_reset(void* start, size_t size) {
-  // We always use MADV_DONTNEED even if it may be a bit more expensive as this
-  // guarantees that we see the actual rss reflected in tools like `top`.
+  // We try to use `MADV_FREE` as that is the fastest. A drawback though is that it 
+  // will not reduce the `rss` stats in tools like `top` even though the memory is available
+  // to other processes. With the default `MIMALLOC_PURGE_DECOMMITS=1` we ensure that by 
+  // default `MADV_DONTNEED` is used though.
   #if defined(MADV_FREE)
   static _Atomic(size_t) advice = MI_ATOMIC_VAR_INIT(MADV_FREE);
   int oadvice = (int)mi_atomic_load_relaxed(&advice);
@@ -437,7 +459,7 @@ int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, bo
 
 int _mi_prim_alloc_huge_os_pages(void* hint_addr, size_t size, int numa_node, bool* is_zero, void** addr) {
   MI_UNUSED(hint_addr); MI_UNUSED(size); MI_UNUSED(numa_node);
-  *is_zero = true;
+  *is_zero = false;
   *addr = NULL;
   return ENOMEM;
 }
@@ -601,11 +623,19 @@ void _mi_prim_process_info(mi_process_info_t* pinfo)
   pinfo->page_faults = 0;
 #elif defined(__APPLE__)
   pinfo->peak_rss = rusage.ru_maxrss;         // macos reports in bytes
+  #ifdef MACH_TASK_BASIC_INFO
   struct mach_task_basic_info info;
   mach_msg_type_number_t infoCount = MACH_TASK_BASIC_INFO_COUNT;
   if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, (task_info_t)&info, &infoCount) == KERN_SUCCESS) {
     pinfo->current_rss = (size_t)info.resident_size;
   }
+  #else
+  struct task_basic_info info;
+  mach_msg_type_number_t infoCount = TASK_BASIC_INFO_COUNT;
+  if (task_info(mach_task_self(), TASK_BASIC_INFO, (task_info_t)&info, &infoCount) == KERN_SUCCESS) {
+    pinfo->current_rss = (size_t)info.resident_size;
+  }
+  #endif
 #else
   pinfo->peak_rss = rusage.ru_maxrss * 1024;  // Linux/BSD report in KiB
 #endif

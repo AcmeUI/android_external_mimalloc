@@ -63,7 +63,6 @@ mi_decl_nodiscard inline bool mi_option_is_enabled(mi_option_t option)
 {
   switch (option) {
   case mi_option_eager_commit:
-  case mi_option_allow_purge:
   case mi_option_purge_decommits:
   return true;
   default:
